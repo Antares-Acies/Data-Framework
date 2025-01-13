@@ -1,21 +1,27 @@
-import logging
+"""
+data_validation.py
+This script is responsible for validating raw data to ensure it meets the required standards and formats.
+It generates a Data Quality (DQ) Report that highlights any discrepancies or issues found during the validation process.
+"""
+
 global create_engine, inspect
+global paramiko, ssh_exception, BytesIO
+global datetime, pytz
+global pa, pq
+
+import logging
 import pandas as pd
 import logging
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import URL
 import os
-global paramiko, ssh_exception, BytesIO
 from io import BytesIO
 import paramiko
 from paramiko import ssh_exception
-global datetime
 from datetime import datetime
-global pa, pq
 import pyarrow as pa
 import pyarrow.parquet as pq
 import shutil
-global pytz
 import pytz
 
 global log_error
@@ -24,6 +30,15 @@ def log_error(source_table_name=None,
               error_message=None, error_type=None):
     """
     Log the error in validation_error dictionary.
+
+    Parameters:
+    - source_table_name (str): Name of the source table.
+    - check_type (str): Type of check being performed.
+    - error_reporting_tag_value (str): Tag value for error reporting.
+    - unique_identifier (str): Unique identifier for the record.
+    - dq_column_name (str): Name of the column being validated.
+    - error_message (str): Error message to log.
+    - error_type (str): Type of error.
     """
     validation_error['extract_date'].append(extract_date)
     validation_error['dq_run_date'].append(dq_run_date)
@@ -38,6 +53,16 @@ def log_error(source_table_name=None,
 
 global map_datatype
 def map_datatype(value):
+    """
+    Map the datatype to the corresponding conversion function.
+
+    Parameters:
+    - value (str): The datatype as a string.
+
+    Expected Output:
+    - Function: Corresponding conversion function for the datatype.
+    """
+
     if value == "datetime":
         return pd.to_datetime
     if value == "float":
@@ -47,6 +72,14 @@ def map_datatype(value):
 
 global convert_datatype
 def convert_datatype(value, type):
+    """
+    Convert the value into the desired type.
+
+    Parameters:
+    - value: The value to be converted.
+    - type (str): The target datatype.
+    """
+
     if type == "datetime":
         dt_value = pd.to_datetime(value, errors='coerce')
         if pd.isna(dt_value):
@@ -56,10 +89,28 @@ def convert_datatype(value, type):
         return float(value)
     return str(value)
 
+
 global validate_data
 def validate_data(source, df, column_name, expected_dtype, condition_type, condition_value, check_type, unique_identifier_column, error_reporting_tag, error_type, indices_to_drop):
     """
-    Validate Data and returns the filtered df.
+    Validate Data and returns the filtered DataFrame.
+
+    Parameters:
+    - source (str): Name of the source table.
+    - df (DataFrame): DataFrame containing the data to be validated.
+    - column_name (str): Name of the column to be validated.
+    - expected_dtype (str): Expected datatype of the column.
+    - condition_type (str): Type of condition to validate (e.g., 'equal to', 'greater than').
+    - condition_value: Value to be used in the condition for validation.
+    - check_type (str): Type of check being performed (e.g., 'null_check', 'unique_check').
+    - unique_identifier_column (str): Column name used as a unique identifier for records.
+    - error_reporting_tag (str): Tag value for error reporting.
+    - error_type (str): Type of error (e.g., 'FATAL').
+    - indices_to_drop (set): Set of indices to be dropped in case of FATAL errors.
+
+    Side Effects:
+    - Logs errors in the validation_error dictionary.
+    - Updates the indices_to_drop set with indices of rows that fail FATAL checks.
     """
 
     duplicates = pd.DataFrame()
@@ -185,7 +236,13 @@ def validate_data(source, df, column_name, expected_dtype, condition_type, condi
 global process_validations
 def process_validations(all_validations):
     """
-    Process all sftp validations.
+    Process all SFTP validations.
+
+    Parameters:
+    - all_validations (DataFrameGroupBy): Grouped DataFrame containing all validations.
+
+    Side Effects:
+    - Updates the all_validated_df dictionary with validated DataFrames.
     """
     
     # Iterate over each table
@@ -275,6 +332,12 @@ global validate
 def validate(all_checks):
     """
     Validate the checks.
+
+    Parameters:
+    - all_checks (DataFrame): DataFrame containing all checks to be validated.
+
+    Side Effects:
+    - Updates the all_validated_df dictionary with validated DataFrames.
     """
     
     global all_validated_df

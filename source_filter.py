@@ -1,3 +1,9 @@
+"""
+source_filter.py
+This script filters the source data according to specified criteria and saves the filtered data as a Parquet file.
+It ensures that only relevant data is retained for further processing.
+"""
+
 import logging
 import time
 
@@ -6,6 +12,9 @@ logging.warning("Started Source Filtering.....\n")
 
 global ssh_exception, BytesIO
 global pa, pq
+global datetime
+global create_engine, inspect, decrypt_existing_db_credentials, default_engine_creator
+global PLATFORM_FILE_PATH, decrypt_existing_sftp_credentials
 
 # can be removed in computation editor
 import paramiko
@@ -13,30 +22,36 @@ import pandas as pd
 import os
 import json
 
-
 import shutil
 from paramiko import ssh_exception
 from io import BytesIO
 import pyarrow as pa
 import pyarrow.parquet as pq
-global datetime
 from datetime import datetime 
-
-global create_engine, inspect, decrypt_existing_db_credentials, default_engine_creator
 
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import URL
 from Core.users.computations.db_credential_encrytion import decrypt_existing_db_credentials
 from Core.users.computations.db_centralised_function import default_engine_creator 
-
-global PLATFORM_FILE_PATH, decrypt_existing_sftp_credentials
 from config.settings.base import PLATFORM_FILE_PATH
 from Core.users.computations.sftp_credential_encryption import decrypt_existing_sftp_credentials
 
 global get_db_connection
 def get_db_connection(database, location):
+    """
+    Parameters:
+    - database (str): The name of the database to connect to.
+    - location (str): The location of the database (INTERNAL or EXTERNAL).
 
-    # Choose file based on DB location
+    Returns:
+    - engine: SQLAlchemy engine object.
+    - connection: SQLAlchemy connection object.
+    - schema: The schema of the database.
+    - inspector: SQLAlchemy inspector object.
+    """
+    
+    logging.warning(f"Establishing {location} DB connection for: {database}")
+
     if location == "INTERNAL":
         db_creds_path = f'{PLATFORM_FILE_PATH}user_databases.json'
     else:
@@ -111,7 +126,12 @@ def get_db_connection(database, location):
 global get_sftp_connection
 def get_sftp_connection(Sftp_Name):
     """
-    Returns Sftp client connection object
+    Parameters:
+    - Sftp_Name (str): The name of the SFTP server to connect to.
+
+    Returns:
+    - sftp_client: Paramiko SFTP client object.
+    - ssh_client: Paramiko SSH client object.
     """
 
     sftp_file_path = f"{PLATFORM_FILE_PATH}sftp_remote_info.json"
@@ -160,6 +180,14 @@ def get_sftp_connection(Sftp_Name):
 
 global map_datatype
 def map_datatype(value):
+    """
+    Parameters:
+    - value (str): The datatype to map.
+
+    Returns:
+    - function: The corresponding function to convert the datatype.
+    """
+
     if value == "datetime":
         return pd.to_datetime
     if value == "float":
@@ -169,6 +197,15 @@ def map_datatype(value):
 
 global convert_datatype
 def convert_datatype(value, type):
+    """
+    Parameters:
+    - value: The value to convert.
+    - type (str): The target datatype.
+
+    Returns:
+    - The value converted to the target datatype.
+    """
+
     if type == "datetime":
         dt_value = pd.to_datetime(value, errors='coerce')
         if pd.isna(dt_value):
@@ -183,6 +220,17 @@ global filter_data
 def filter_data(table_name, df, column_name, expected_dtype, condition_type, condition_value):
     """
     Filter Data and returns the filtered df.
+
+    Parameters:
+    - table_name (str): The name of the table.
+    - df (DataFrame): The dataframe to filter.
+    - column_name (str): The column to apply the filter on.
+    - expected_dtype (str): The expected datatype of the column.
+    - condition_type (str): The type of condition (e.g., 'equal to', 'greater than').
+    - condition_value: The value to filter by.
+
+    Returns:
+    - DataFrame: The filtered dataframe.
     """
     
     if 'date' in column_name:
@@ -236,10 +284,18 @@ def filter_data(table_name, df, column_name, expected_dtype, condition_type, con
 global extract_and_apply_filters
 def extract_and_apply_filters(table_name, df, filters):
     """
-    Accepts table name ,dataframe and filters to apply on the dataframe. It filters the table and return the dataframe
+    It filters the table and returns the dataframe.
+
+    Parameters:
+    - table_name (str): The name of the table.
+    - df (DataFrame): The dataframe to filter.
+    - filters (DataFrame): The filters to apply.
+
+    Returns:
+    - None: The filtered dataframe is stored in the global variable all_filtered_df.
     """
     
-    # Iterate over each filter in a each table in each connection_name
+    # Iterate over each filter in each table in each connection_name
     for i, filter in filters.iterrows():
         logging.warning(f"Filtering row:{i+2}")
  
@@ -293,6 +349,13 @@ global process_db_filters
 def process_db_filters(all_db_filters, location):
     """
     Process all db filters.
+
+    Parameters:
+    - all_db_filters (DataFrame): The dataframe containing all the filters.
+    - location (str): The location of the database (INTERNAL or EXTERNAL).
+
+    Returns:
+    - None: The filtered data is stored in the global variable all_filtered_df.
     """
  
     # Iterate over each connection_name
@@ -331,11 +394,17 @@ def process_db_filters(all_db_filters, location):
         logging.warning(f"Done for {connection_name}")
         logging.warning("   ")
 
-
+               
 global process_sftp_filters
 def process_sftp_filters(all_sftp_filters):
     """
-    Process all sftp filters.
+    Process all SFTP filters.
+
+    Parameters:
+    - all_sftp_filters (DataFrame): The dataframe containing all the SFTP filters.
+
+    Returns:
+    - None: The filtered data is stored in the global variable all_filtered_df.
     """
 
     # Iterate over each connection_name
@@ -357,7 +426,7 @@ def process_sftp_filters(all_sftp_filters):
         for file, filters in file_group:
           
             path = filters.loc[filters['source_name'] == file, 'source_connection_location'].iloc[0]
-            file_path = os.path.join(path,file)
+            file_path = os.path.join(path, file)
 
             _, file_extension = os.path.splitext(file_path)
 
@@ -406,7 +475,13 @@ def process_sftp_filters(all_sftp_filters):
 global filter_source
 def filter_source(all_filters):
     """
-    Validate the checks.
+    Apply filters to the source data.
+
+    Parameters:
+    - all_filters (DataFrame): The dataframe containing all the filters.
+
+    Returns:
+    - None: The filtered data is stored in the global variable all_filtered_df.
     """
     
     global all_filtered_df
@@ -453,13 +528,13 @@ def filter_source(all_filters):
         logging.warning("   ")
 
     logging.warning(f"Saving file to parquet dir: {parquet_raw_path}")
-    # Save filterd data to parquet
+    # Save filtered data to parquet
     
     if all_filtered_df:
         for table_name, temp_df in all_filtered_df.items():
             try:
                 # save to Raw Data Directory
-                df_save_path_parquet = os.path.join(parquet_raw_path,f"{table_name}.parquet")
+                df_save_path_parquet = os.path.join(parquet_raw_path, f"{table_name}.parquet")
                 temp_table = pa.Table.from_pandas(temp_df)
                 pq.write_table(temp_table, df_save_path_parquet)
 
@@ -474,7 +549,7 @@ def filter_source(all_filters):
                 logging.warning(f"Error in saving parquet for {table_name}, {df_save_path_parquet}")
     else:
         logging.warning("No data to be saved.")
-      
+
 
 # Main Code
 global config_file_path

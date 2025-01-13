@@ -1,72 +1,51 @@
-
-
-# -*- coding: utf-8 -*-
 """
-Created on Tue Dec  3 14:39:07 2024
-
-@author: KumarAkashdeep
+data_transformation.py
+This script transforms validated data into a structured and meaningful format suitable for use within the Antares System.
+It ensures that the data is ready for further processing and analysis.
 """
+
+global pa, pq
+global paramiko, ssh_exception, BytesIO
 
 import logging
 import pandas as pd
 import os
+import pyarrow as pa
+import pyarrow.parquet as pq
+from io import BytesIO
+import paramiko
+from paramiko import ssh_exception
 
-def read_configurations(config_file):
-    """
-    Reads the configuration Excel file and returns the necessary DataFrames.
-    """
-    try:
-        logging.warning("Reading configuration file.")
-        transformation_mapping = pd.read_excel(config_file, sheet_name='transformation_mapping')
-        logging.warning("Read transformation mapping.")
-        master_repository = pd.read_excel(config_file, sheet_name='master_repository')
-        logging.warning("Read master repository.")
-        conditional_rules = pd.read_excel(config_file, sheet_name='conditional_rule_definition')
-        logging.warning("Read conditional rule definition.")
-        rule_group_definition = pd.read_excel(config_file, sheet_name='rule_group_definition')
-        logging.warning("Read rule group definition.")
-        master_mapping_rule_definition = pd.read_excel(config_file, sheet_name='master_mapping_rule_definition')
-        logging.warning("Read master mapping rule definition.")
-        global_parameter = pd.read_excel(config_file, sheet_name='global_parameter')
-        logging.warning("Read global parameter")
-        
-        
-        logging.warning("Configuration file read successfully.")
-        logging.warning(f"  ")  #for testing
-        logging.warning(f"  ")  #for testing
-        logging.warning(f"  ")  #for testing
-        return transformation_mapping, conditional_rules, master_repository, rule_group_definition, master_mapping_rule_definition, global_parameter
-        
-    except Exception as e:
-        logging.warning(f"Error reading configuration file: {e}")
-        # Error handled gracefully without raising an exception
-        return None, None, None, None, None, None  # Return None if error occurs
-
+# Function to apply value adjustments to a pandas Series
+global apply_value_adjustment
 def apply_value_adjustment(values, operation, operation_value):
     """
     Applies value adjustment operation to a pandas Series.
-    If either operation or operation_value is None, returns the input values without transformation.
+    
+    Parameters:
+    values (Series): The input pandas Series to be adjusted.
+    operation (str): The type of operation to apply (e.g., 'DATETIME', 'FLOAT', 'DATE', 'STRING').
+    operation_value (str): The value associated with the operation (e.g., date format).
+    
+    Returns:
+    Series: The adjusted pandas Series.
+    
+    Side Effects:
+    Logs warnings if there are issues with the operation or operation_value.
     """
     logging.warning(f"operation {operation} ")
     logging.warning(f"operation_value {operation_value} ")
-    # logging.warning(f"values {values} ")
-
-
 
     if pd.isna(operation) or pd.isna(operation_value):
         logging.warning("Operation or operation_value is None or NaN. Returning original values.")
-        logging.warning(f"  ")  #for testing
         return values
     
     if operation is None or operation_value is None:
         logging.warning("Operation or operation_value is None. Returning input values without transformation.")
-        logging.warning(f"  ")  #for testing
         return values
-
 
     try:
         if operation.upper() == 'DATETIME':
-            # Map the format string
             format_string = operation_value.replace('YYYY', '%Y').replace('MM', '%m').replace('DD', '%d')
             return pd.to_datetime(values, format=format_string, errors='coerce')
         elif operation.upper() == 'FLOAT':
@@ -77,18 +56,27 @@ def apply_value_adjustment(values, operation, operation_value):
         elif operation.upper() == 'STRING':
             return values.astype(str)
         else:
-            logging.warning(f"  ")  #for testing
             logging.warning(f"Unknown value adjustment operation: {operation}")
-            logging.warning(f"  ")  #for testing
             return values
     except Exception as e:
         logging.warning(f"Error applying value adjustment: {e}")
         return values
 
-
+# Function to process conditional operations for a given row
+global process_conditional_operation
 def process_conditional_operation(row, source_data, conditional_rules, target_data, rule_group_definition):
     """
     Processes conditional operations for a given row.
+    
+    Parameters:
+    row (Series): The row from the transformation mapping DataFrame.
+    source_data (dict): Dictionary of source data DataFrames.
+    conditional_rules (DataFrame): DataFrame containing conditional rules.
+    target_data (dict): Dictionary to store the transformed target data.
+    rule_group_definition (DataFrame): DataFrame containing rule group definitions.
+    
+    Side Effects:
+    Logs warnings if there are issues with the conditional operations.
     """
     logging.warning(f"Inside process_conditional_operation function.")
     try:
@@ -118,7 +106,6 @@ def process_conditional_operation(row, source_data, conditional_rules, target_da
 
         # Get the data from source table
         if source_table_name not in source_data:
-            # logging.warning(f"Source data for '{source_table_name}' not available. Skipping this mapping.")
             return
 
         data = source_data[source_table_name]
@@ -152,7 +139,6 @@ def process_conditional_operation(row, source_data, conditional_rules, target_da
             condition_column = cond_data[condition_column_name]
 
             # Apply value adjustment to condition_column if needed
-            # For now, we proceed without data type conversion for the condition column
             logging.warning(f"condition_type {condition_type} ")
             if condition_type == 'EMPTY':
                 cond = condition_column.isnull() | (condition_column == '')
@@ -175,7 +161,6 @@ def process_conditional_operation(row, source_data, conditional_rules, target_da
 
             # Get the values to assign
             values_to_assign = target_value_data[target_column_value]
-            # logging.warning(f"values_to_assign {values_to_assign} ")
 
             # Apply value adjustment if specified
             if value_adjustment_operation and transformation_operation_value:
@@ -184,22 +169,31 @@ def process_conditional_operation(row, source_data, conditional_rules, target_da
             # Assign the values where the condition is True
             target_series.loc[cond] = values_to_assign.loc[cond]
 
-        if target_table_name not in target_data:
-            target_data[target_table_name] = pd.DataFrame(index=data.index)
+        if source_table_name not in target_data:
+            target_data[source_table_name] = pd.DataFrame(index=data.index)
 
         # Assign the target_series to the target column
         logging.warning(f"target_series {target_series} ")
-        target_data[target_table_name][target_column_name] = target_series
+        target_data[source_table_name][target_column_name] = target_series
 
         logging.warning(f"Conditional operation completed for target column '{target_column_name}'.")
 
     except Exception as e:
         logging.warning(f"Error in conditional operation: {e}")
-        # Error handled gracefully without raising an exception
 
+# Function to process direct mapping for a given row
+global process_direct_mapping
 def process_direct_mapping(row, source_data, target_data):
     """
     Processes direct mapping for a given row.
+    
+    Parameters:
+    row (Series): The row from the transformation mapping DataFrame.
+    source_data (dict): Dictionary of source data DataFrames.
+    target_data (dict): Dictionary to store the transformed target data.
+    
+    Side Effects:
+    Logs warnings if there are issues with the direct mapping.
     """
     try:
         target_table_name = row['target_table_name']
@@ -212,12 +206,11 @@ def process_direct_mapping(row, source_data, target_data):
         logging.warning(f"Processing direct mapping for target column '{target_column_name}' from source column '{source_column_name}'.")
 
         if source_table_name not in source_data:
-            # logging.warning(f"Source data for '{source_table_name}' not available. Skipping this mapping.")
             return
 
         data = source_data[source_table_name]
-        if target_table_name not in target_data:
-            target_data[target_table_name] = pd.DataFrame(index=data.index)
+        if source_table_name not in target_data:
+            target_data[source_table_name] = pd.DataFrame(index=data.index)
 
         values_to_assign = data[source_column_name]
 
@@ -225,15 +218,27 @@ def process_direct_mapping(row, source_data, target_data):
         if value_adjustment_operation and transformation_operation_value:
             values_to_assign = apply_value_adjustment(values_to_assign, value_adjustment_operation, transformation_operation_value)
 
-        target_data[target_table_name][target_column_name] = values_to_assign
+        target_data[source_table_name][target_column_name] = values_to_assign
 
     except Exception as e:
         logging.warning(f"Error in direct mapping: {e}")
-        # Error handled gracefully without raising an exception
 
+# Function to process master mapping operation for a given row
+global process_master_mapping
 def process_master_mapping(row, source_data, master_repository, target_data, rule_group_definition, master_mapping_rule_definition):
     """
     Processes master mapping operation for a given row, considering additional mapping layers.
+    
+    Parameters:
+    row (Series): The row from the transformation mapping DataFrame.
+    source_data (dict): Dictionary of source data DataFrames.
+    master_repository (DataFrame): DataFrame containing master repository data.
+    target_data (dict): Dictionary to store the transformed target data.
+    rule_group_definition (DataFrame): DataFrame containing rule group definitions.
+    master_mapping_rule_definition (DataFrame): DataFrame containing master mapping rule definitions.
+    
+    Side Effects:
+    Logs warnings if there are issues with the master mapping.
     """
     try:
         target_table_name = row['target_table_name']
@@ -244,7 +249,6 @@ def process_master_mapping(row, source_data, master_repository, target_data, rul
         logging.warning(f"Processing master mapping for target column '{target_column_name}' using transformation rule reference '{transformation_rule_reference}'.")
 
         if source_table_name not in source_data:
-            # logging.warning(f"Source data for '{source_table_name}' not available. Skipping this mapping.")
             return
 
         data = source_data[source_table_name]
@@ -262,7 +266,6 @@ def process_master_mapping(row, source_data, master_repository, target_data, rul
         if master_mapping_row.empty:
             logging.warning(f"No master mapping found for rule set '{rule_set}'.")
             return
-        # Assuming only one row per rule_set
         master_mapping_row = master_mapping_row.iloc[0]
         master_table_name = master_mapping_row['master_table_name']
         master_source_column = master_mapping_row['master_source_column']
@@ -278,19 +281,31 @@ def process_master_mapping(row, source_data, master_repository, target_data, rul
         mapping_dict = dict(zip(master_data[master_source_column], master_data[master_target_column]))
         logging.warning(f"Mapping dictionary created with {len(mapping_dict)} entries.")
 
-        if target_table_name not in target_data:
-            target_data[target_table_name] = pd.DataFrame(index=data.index)
+        if source_table_name not in target_data:
+            target_data[source_table_name] = pd.DataFrame(index=data.index)
 
         # Apply the mapping to the source column
         source_values = data[source_column_name].map(mapping_dict)
-        target_data[target_table_name][target_column_name] = source_values
+        target_data[source_table_name][target_column_name] = source_values
     except Exception as e:
         logging.warning(f"Error in master mapping: {e}")
-        # Error handled gracefully without raising an exception
 
+# Function to process global operation for a given row
 def process_global_operation(row, global_parameter, source_data, target_data):
     """
     Processes global parameter mapping for a given row.
+
+    Parameters:
+    - row: A dictionary containing information about the target table and column.
+    - global_parameter: A DataFrame containing global parameters and their values.
+    - source_data: A dictionary containing source data tables.
+    - target_data: A dictionary to store the transformed target data.
+
+    Expected output:
+    - The target column in the target table is assigned a value from the global parameters.
+
+    Side effects:
+    - Logs warnings if no matching global parameter is found or if the number of rows cannot be determined.
     """
     try:
         target_table_name = row['target_table_name']
@@ -300,7 +315,6 @@ def process_global_operation(row, global_parameter, source_data, target_data):
         logging.warning(f"Processing global parameter mapping for target column '{target_column_name}' in table '{target_table_name}'.")
 
         # Get the value from global_parameter DataFrame
-        # Filter global_parameter where 'column_name' == target_column_name
         matching_param = global_parameter[global_parameter['column_name'] == target_column_name]
         if matching_param.empty:
             logging.warning(f"No matching global parameter found for column '{target_column_name}'. Skipping.")
@@ -309,27 +323,18 @@ def process_global_operation(row, global_parameter, source_data, target_data):
         value = matching_param.iloc[0]['value']
 
         # Now, assign this value to the target_data
-        # Determine the number of rows
-
         if target_table_name in target_data:
-            # Use existing target_data[target_table_name]
             num_rows = len(target_data[target_table_name])
             index = target_data[target_table_name].index
         elif source_table_name and source_table_name in source_data:
-            # Use the index of the source_data[source_table_name]
             num_rows = len(source_data[source_table_name])
             index = source_data[source_table_name].index
-            # Initialize the target_data[target_table_name]
             target_data[target_table_name] = pd.DataFrame(index=index)
         else:
-            # Cannot determine the number of rows
             logging.warning(f"Cannot determine the number of rows for target table '{target_table_name}'. Skipping.")
             return
 
-        # Create a Series with the constant value
         values_to_assign = pd.Series([value] * num_rows, index=index)
-
-        # Assign the value to the target column
         target_data[target_table_name][target_column_name] = values_to_assign.values
 
         logging.warning(f"Assigned global parameter value '{value}' to column '{target_column_name}' in table '{target_table_name}'.")
@@ -338,125 +343,193 @@ def process_global_operation(row, global_parameter, source_data, target_data):
         logging.warning(f"Error in global parameter mapping: {e}")
         # Error handled gracefully without raising an exception
 
-def process_transformations(transformation_mapping, conditional_rules, master_repository, source_data, target_data, rule_group_definition, master_mapping_rule_definition, global_parameter):
+# Function to process all transformation
+def process_transformations(transformation_mapping, conditional_rules, master_repository, source_data, target_data, rule_group_definition, master_mapping_rule_definition):
     """
     Processes all the transformations as per the transformation mapping.
+
+    Parameters:
+    - transformation_mapping: A DataFrame containing the mapping of transformations.
+    - conditional_rules: A dictionary containing conditional rules for transformations.
+    - master_repository: A repository containing master data for mapping.
+    - source_data: A dictionary containing source data tables.
+    - target_data: A dictionary to store the transformed target data.
+    - rule_group_definition: Definitions for rule groups.
+    - master_mapping_rule_definition: Definitions for master mapping rules.
+
+    Expected output:
+    - Transformed data stored in the target_data dictionary.
+
+    Side effects:
+    - Logs warnings if source data is not available or if an unknown transformation type is encountered.
     """
     try:
-        # Get unique source_table_names
         unique_source_tables = transformation_mapping['source_table_name'].unique()
-        # Variable to control outer loop
         break_outer = False
 
         for source_table in unique_source_tables:
             logging.warning(f" ")
             logging.warning(f"Processing transformations for source table '{source_table}'.")
-            # Break the outer loop if needed
-            # if source_table == 'Your_Break_Source_Table_Name':
-            #     break
 
-            # Filter the transformation mapping for this source_table
             transformations_for_source = transformation_mapping[transformation_mapping['source_table_name'] == source_table]
 
-            # If source_table not in source_data, skip
             if source_table not in source_data:
                 logging.warning(f"Source data for '{source_table}' not available. Skipping transformations for this source.")
                 logging.warning(f"   ")
                 logging.warning(f"   ")
                 continue
 
-            # Variable to control inner loop
-            # breaking_at_index = 10  # Set to desired index to break inner loop
-            # current_idx = 0
-            
-
-            # Process each transformation for this source_table
             for idx, row in transformations_for_source.iterrows():
                 transformation_type = row['transformation_type']
 
-                # Break the inner loop if needed
-                # if current_idx >= breaking_at_index:
-                #     break
-                # current_idx += 1
-
                 if transformation_type == 'Direct Mapping':
-                    # continue
                     process_direct_mapping(row, source_data, target_data)
                 elif transformation_type == 'Master Mapping Operations':
-                    # continue 
                     process_master_mapping(row, source_data, master_repository, target_data, rule_group_definition, master_mapping_rule_definition)
                 elif transformation_type == 'Conditional Operations':
-                    # continue
                     process_conditional_operation(row, source_data, conditional_rules, target_data, rule_group_definition)
                 elif transformation_type == 'Global Parameter':
-                    # continue
                     process_global_operation(row, global_parameter, source_data, target_data)
                 else:
-                    # continue
                     logging.warning(f"source table name { source_table} Unknown transformation type '{transformation_type}'. Skipping row {idx}.")
 
-            # Uncomment to break the outer loop after processing the first source_table
-            # break
-            
             import time
-            time.sleep(5)   #enoughf time to read log properly.
-            
+            time.sleep(5)   # enough time to read log properly.
+
     except Exception as e:
         logging.warning(f"Error processing transformations: {e}")
         # Error handled gracefully without raising an exception
-        
+
+# Function to read source data
 def read_source_data(source_table_names):
     """
     Reads source data from individual files, supporting Excel and CSV formats.
+
+    Parameters:
+    - source_table_names: A list of source table names to read data from.
+
+    Expected output:
+    - A dictionary containing the source data tables.
+
+    Side effects:
+    - Logs warnings if a source data file is not found or if an error occurs while reading the data.
     """
     source_data = {}
-    source_folder = r"C:\Users\KumarAkashdeep\Downloads\data configuration"  # Update the path to your actual source data folder
+    
     for source_table_name in source_table_names:
         try:
             logging.warning(f"Reading source data for '{source_table_name}'.")
-            # File extensions to search for
-            file_found = False
-            for ext in ['.xlsb', '.xlsx', '.xls', '.csv']:
-                file_path = os.path.join(source_folder, f"{source_table_name}{ext}")
-                if os.path.exists(file_path):
-                    if ext == '.xlsb':
-                        data = pd.read_excel(file_path, engine='pyxlsb')
-                    elif ext == '.csv':
-                        data = pd.read_csv(file_path)  # Use read_csv for CSV files
-                    else:
-                        data = pd.read_excel(file_path)
-                    source_data[source_table_name] = data
-                    logging.warning(f"Read data for '{source_table_name}' from '{file_path}'.")
-                    file_found = True
-                    break
-            if not file_found:
+
+            file_path_pq = os.path.join(parquet_error_free_path, f"{source_table_name}.parquet")
+            
+            if os.path.exists(file_path_pq):
+                data = pd.read_parquet(file_path_pq)
+                source_data[source_table_name] = data
+            else:
                 logging.warning(f"Source data file for '{source_table_name}' not found. Skipping this source.")
+            
         except Exception as e:
             logging.warning(f"Error reading source data for '{source_table_name}': {e}")
             # Error handled gracefully without raising an exception
     return source_data
 
+# Function to write output
 def write_output_data(target_data):
     """
     Writes the target tables to separate Excel files.
+
+    Parameters:
+    - target_data: A dictionary containing the transformed target data tables.
+
+    Expected output:
+    - Target data written to Excel files.
+
+    Side effects:
+    - Logs warnings if an error occurs while writing the data.
     """
     try:
         logging.warning("Writing output data to target Excel files.")
-        output_folder = 'output_data'  # Replace with your desired output folder path
-        os.makedirs(output_folder, exist_ok=True)
+        
         for table_name, data in target_data.items():
-            output_file = os.path.join(output_folder, f"{table_name}.xlsx")
-            logging.warning(f"  ")  #for testing
-            logging.warning(f"Writing data for target table '{table_name}' to '{output_file}'.")
-            data.to_excel(output_file, index=False)
+            df_save_path_parquet = os.path.join(parquet_transformed_path, f"{table_name}.parquet")
+            logging.warning(f"  ")  # for testing
+            logging.warning(f"Writing data for target table '{table_name}' to '{df_save_path_parquet}'.")
+
+            temp_table = pa.Table.from_pandas(data)
+            pq.write_table(temp_table, df_save_path_parquet)
+
+            df_save_path = fr"/home/azureuser/DataFrameWork Testing/Output/{table_name}.xlsx"
+            excel_buffer = BytesIO()
+            data.to_excel(excel_buffer, index=False)
+            excel_buffer.seek(0) 
+            sftp_client.putfo(excel_buffer, df_save_path)
+
         logging.warning("Output data written successfully.")
     except Exception as e:
         logging.warning(f"Error writing output data: {e}")
         # Error handled gracefully without raising an exception
 
 # Read configurations
-config_file = r"C:\Users\KumarAkashdeep\Downloads\data configuration\Antares Data Framework.xlsx"
-transformation_mapping, conditional_rules, master_repository, rule_group_definition, master_mapping_rule_definition, global_parameter = read_configurations(config_file)
+global config_file_path
+config_file_path = Config_File_Path
+
+sftp_creds = Data1
+
+# if Sftp_Name is None or Sftp_Name == "":
+#     logging.warning("Terminating because sftp name not found")
+#     raise Exception("Terminating because sftp name not found")
+  
+try:
+    # filtered_sftp_df =sftp_creds[sftp_creds['variable_name'] == 'Sftp Name'].reset_index(drop=True)
+    # index = filtered_sftp_df[filtered_sftp_df['variable_value'] == Sftp_Name].index[0]
+    
+    hostname = sftp_creds.loc[sftp_creds["variable_name"] == "Hostname", "variable_value"].iloc[0]
+    username = sftp_creds.loc[sftp_creds["variable_name"] == "Username", "variable_value"].iloc[0]
+    user_secret_key = sftp_creds.loc[sftp_creds["variable_name"] == "Password", "variable_value"].iloc[0]
+    port = sftp_creds.loc[sftp_creds["variable_name"] == "Port", "variable_value"].iloc[0]
+    
+    global sftp_client
+    ssh_client = paramiko.SSHClient()
+    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    logging.warning(f"Connecting to the SFTP server: {username}...")
+    ssh_client.connect(hostname=hostname, username=username, password=user_secret_key, port=port, banner_timeout=200)
+    sftp_client = ssh_client.open_sftp()
+    logging.warning("Connected to the SFTP server.")
+
+except ssh_exception.AuthenticationException as e:
+    logging.warning(f"AuthenticationException Connnecting to the sftp: {username}: {e}")
+
+except Exception as e:
+    logging.warning(f"Error Connnecting to the sftp: {username}: {e}")
+    raise Exception(f"Error Connnecting to the sftp: {username}: {e}")
+
+# Read Antares Master File
+try:
+    with sftp_client.file(config_file_path, 'rb') as remote_file:
+        file_data = remote_file.read()
+    master_file_buffer = BytesIO(file_data)
+except FileNotFoundError:
+    raise Exception(f"File not found:{config_file_path}")
+
+global parquet_path, parquet_error_free_path, parquet_transformed_path
+parquet_path = r"/opt/revolutio/Platform_Configs/alm_data/Data Framework"
+parquet_error_free_path = os.path.join(parquet_path, "Error Free Data")
+parquet_transformed_path = os.path.join(parquet_path, "Transformed Data")
+
+# Create directories if not exist
+if not os.path.exists(parquet_error_free_path):
+    raise Exception("No Error Free Data found to transform")
+
+os.makedirs(parquet_transformed_path, exist_ok=True)
+
+config_file = pd.ExcelFile(master_file_buffer)
+
+try:
+    transformation_mapping, master_repository, conditional_rules, rule_group_definition, master_mapping_rule_definition, global_parameter = Data2, Data3, Data4, Data5, Data6, pd.read_excel(config_file, sheet_name='global_parameter')
+except ValueError as e:
+    logging.warning("Global parameter Sheet not found")
+except Exception as e:
+    raise Exception(f"Error in reading config data: {e}")
 
 # Check if configurations were read successfully
 if transformation_mapping is None:
@@ -467,12 +540,22 @@ else:
 
     # Read source data
     source_data = read_source_data(source_table_names)
-
+  
     # Create empty target_data dictionary
+    global target_data
     target_data = {}
 
     # Process transformations
-    process_transformations(transformation_mapping, conditional_rules, master_repository, source_data, target_data, rule_group_definition, master_mapping_rule_definition, global_parameter)
+    process_transformations(transformation_mapping, conditional_rules, master_repository, source_data, target_data, rule_group_definition, master_mapping_rule_definition)
 
     # Write output data
     write_output_data(target_data)
+
+    file_names = [os.path.splitext(i)[0] for i in os.listdir(parquet_error_free_path)]
+    file_status = [file_name in target_data.keys() for file_name in file_names]
+    output_data = pd.DataFrame({
+        "Table Name": file_names,
+        "Validation Status": file_status
+    })
+    output_data["id"] = output_data.index + 1
+    output_data.insert(0, 'id', output_data.pop('id'))
