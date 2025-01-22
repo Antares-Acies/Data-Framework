@@ -1,42 +1,31 @@
-"""
-source_data_availability.py
-This script checks the availability of the defined data sources to ensure they are present and accessible.
-It verifies that all required sources are available before proceeding with further data processing tasks.
-"""
-
 global os
-global decrypt_existing_db_credentials, default_engine_creator
-global inspect, create_engine, URL
-global PLATFORM_FILE_PATH, decrypt_existing_sftp_credentials
-
 import os
+import logging
+import paramiko
+import json
+global create_engine, decrypt_existing_db_credentials, default_engine_creator
+import pandas as pd
+global inspect, create_engine, URL
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import URL
 from Core.users.computations.db_credential_encrytion import decrypt_existing_db_credentials
 from Core.users.computations.db_centralised_function import default_engine_creator 
-
+global ssh_exception
+from paramiko import ssh_exception
+global PLATFORM_FILE_PATH, decrypt_existing_sftp_credentials
 from config.settings.base import PLATFORM_FILE_PATH
 from Core.users.computations.sftp_credential_encryption import decrypt_existing_sftp_credentials
 
 global get_db_connection
 def get_db_connection(database, location):
-    """
-    Return DB Engine, Connection, Schema and Inspector
 
-    Parameters:
-    database (str): The name of the database to connect to.
-    location (str): The location of the database, either 'INTERNAL' or 'EXTERNAL'.
-
-    Returns:
-    tuple: A tuple containing the engine, connection, schema, and inspector objects.
-    """
-    
     logging.warning(f"Establishing {location} DB connection for: {database}")
     if location == "INTERNAL":
         db_creds_path = f'{PLATFORM_FILE_PATH}user_databases.json'
     else:
         db_creds_path = f'{PLATFORM_FILE_PATH}external_databases.json'
 
+        
     # Connection to DB starts  
     try:
         with open(db_creds_path, 'r') as file:
@@ -103,13 +92,8 @@ global get_sftp_connection
 def get_sftp_connection(Sftp_Name):
     """
     Returns Sftp client connection object
-
-    Parameters:
-    Sftp_Name (str): The name of the SFTP connection.
-
-    Returns:
-    tuple: A tuple containing the SFTP client and SSH client objects.
     """
+
     logging.warning(f"Establishing connection for sftp: {Sftp_Name}")
     sftp_file_path = f"{PLATFORM_FILE_PATH}sftp_remote_info.json"
 
@@ -157,13 +141,7 @@ def get_sftp_connection(Sftp_Name):
 
 global check_db
 def check_db(all_db_sources, location):
-    """
-    Check availability of All DB sources
-
-    Parameters:
-    all_db_sources (DataFrameGroupBy): Grouped DataFrame containing all database sources.
-    location (str): The location of the database, either 'INTERNAL' or 'EXTERNAL'.
-    """
+    
     for connection_name, db_group in all_db_sources:
         
         engine, connection, schema, inspector = get_db_connection(connection_name, location)
@@ -201,12 +179,7 @@ def check_db(all_db_sources, location):
 
 global check_sftp
 def check_sftp(all_sftp_sources):
-    """
-    Check availability of All SFTP sources
 
-    Parameters:
-    all_sftp_sources (DataFrameGroupBy): Grouped DataFrame containing all SFTP sources.
-    """
     for connection_name, sftp_group in all_sftp_sources:
         
         sftp_client, ssh_client = get_sftp_connection(connection_name.strip())
@@ -217,7 +190,6 @@ def check_sftp(all_sftp_sources):
             return 
 
         files = sftp_group["source_name"].unique()
-
         # Iterate over each file
         for file in files:
 
@@ -246,12 +218,7 @@ def check_sftp(all_sftp_sources):
 
 global check
 def check(source_definitions):
-    """
-    Group sources based on their type and check availability for each.
-
-    Parameters:
-    source_definitions (DataFrame): DataFrame containing all source definitions.
-    """
+    
     try:
         # Filter By source_connection_type, and group by source_location
         internal_db_check_to_perform = source_definitions[

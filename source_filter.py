@@ -1,3 +1,10 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jan 15 23:09:20 2025
+
+@author: BAnilKumar
+"""
+
 """
 source_filter.py
 This script filters the source data according to specified criteria and saves the filtered data as a Parquet file.
@@ -15,7 +22,8 @@ global pa, pq
 global datetime
 global create_engine, inspect, decrypt_existing_db_credentials, default_engine_creator
 global PLATFORM_FILE_PATH, decrypt_existing_sftp_credentials
-
+from paramiko import ssh_exception
+import json
 # can be removed in computation editor
 import paramiko
 import pandas as pd
@@ -189,7 +197,7 @@ def map_datatype(value):
     """
 
     if value == "datetime":
-        return pd.to_datetime
+        return object
     if value == "float":
         return float
     
@@ -233,7 +241,9 @@ def filter_data(table_name, df, column_name, expected_dtype, condition_type, con
     - DataFrame: The filtered dataframe.
     """
     
-    if 'date' in column_name:
+    logging.warning(f"Filtering data: {column_name}, {expected_dtype}, {condition_type}, {condition_value}")
+    
+    if 'date' in column_name.lower():
         if not pd.isna(condition_value):
             if isinstance(condition_value, str):
                 date_obj = datetime.strptime(condition_value, "%Y-%m-%d %H:%M:%S")
@@ -241,39 +251,61 @@ def filter_data(table_name, df, column_name, expected_dtype, condition_type, con
             else:
                 condition_value = condition_value.strftime("%Y-%m-%d")
             df[column_name] = pd.to_datetime(df[column_name], errors='coerce', dayfirst=True).dt.strftime('%Y-%m-%d')
-    
-    logging.warning(f"table: {table_name} Filtering: {column_name} '{condition_type}'  '{condition_value}'")
+            logging.warning("Date column adjusted to YYYY-MM-DD")
         
     # Validate condition_type/condition_value
     if (condition_type is None and condition_value is not None) and (condition_type is None and condition_value is not None) :
         logging.warning("condition_type/condition_value empty")
     
     # Validation 
-    elif condition_type and condition_value:
+    elif condition_type and not pd.isna(condition_value):
         try:
-            try:
-                mapped_type = map_datatype(expected_dtype)
-                converted_condition_value = convert_datatype(condition_value, expected_dtype)
-            except Exception as e:
-                logging.warning(f"Error in condition_value conversion{e}")
-                return
+            
+            if condition_type not in ['contains', 'does not contains']:
+                
+                if not pd.isna(expected_dtype):
+                    if expected_dtype.lower() == 'datetime':
+                        df[column_name] = pd.to_datetime(df[column_name])
+                    if expected_dtype == 'float':
+                        condition_value = float(condition_value)
+                        df[column_name] = df[column_name].astype(float)
+                # try:
+                #     mapped_type = map_datatype(expected_dtype)
+                #     converted_condition_value = convert_datatype(condition_value, expected_dtype)
+                #     if converted_condition_value is None:
+                #         logging.warning(f"Invalid Condition Value: {condition_value}, or error in conversion to {expected_dtype} {e}")
+                #         return 
+                # except Exception as e:
+                #     logging.warning(f"Invalid Condition Value: {condition_value}, expected: {expected_dtype}, got:{str(type(condition_value))} {e}")
+                #     return
             
             if condition_type == 'equal to':
-                df = df[df[column_name].astype(mapped_type) == converted_condition_value]
+                df = df[df[column_name] == condition_value]
             elif condition_type == 'not equal to':
-                df = df[df[column_name].astype(mapped_type) != converted_condition_value]
+                df = df[df[column_name] != condition_value]
             elif condition_type == 'greater than':
-                df = df[df[column_name].astype(mapped_type) > converted_condition_value]
+                df = df[df[column_name] > condition_value]
             elif condition_type == 'greater than equal to':
-                df = df[df[column_name].astype(mapped_type) >= converted_condition_value]
+                df = df[df[column_name] >= condition_value]
             elif condition_type == 'less than':
-                df = df[df[column_name].astype(mapped_type) < converted_condition_value]
+                df = df[df[column_name] < condition_value]
             elif condition_type == 'less than equal to':
-                df = df[df[column_name].astype(mapped_type) <= converted_condition_value]
+                df = df[df[column_name] <= condition_value]
+            elif condition_type in ['contains', 'does not contains']:
+                mapping_values_df = mapping_set.loc[mapping_set['mapping_set'] == condition_value, 'mapping_criteria']
+                if mapping_values_df.empty:
+                    logging.warning(f"Mapping set: {condition_value} not found")
+                else:
+                    mapping_values = list(mapping_values_df)
+                    if condition_type == 'contains':
+                        df = df[[column_name].isin(mapping_values)]
+                    else:
+                        df = df[~([column_name].isin(mapping_values))]
+                    logging.warning(f"Applied Mapping set: {condition_value} on {column_name}: {condition_type}, Mapping Values: {mapping_values}")
             else:
                 logging.warning("Unknown type of condition_type")
         except TypeError as e:
-            logging.warning(f"Error while filtering data: {e}")
+            logging.warning(f"Error while filtering data: expected value:{condition_value} {e}")
     else:
         logging.warning("condition_type and condition_value are empty")
         
@@ -296,16 +328,16 @@ def extract_and_apply_filters(table_name, df, filters):
     """
     
     # Iterate over each filter in each table in each connection_name
-    for i, filter in filters.iterrows():
+    for i, filterr in filters.iterrows():
         logging.warning(f"Filtering row:{i+2}")
- 
-        column_name = filter['source_filter_column_name']
-        expected_dtype = filter['condition_datatype']
-        target_table_name = filter['source_table_name']
-
-        if column_name is not None:
-            if expected_dtype is not None:
-                if target_table_name is not None:
+      
+        column_name = filterr['source_filter_column_name']
+        expected_dtype = filterr['condition_datatype']
+        target_table_name = filterr['source_table_name']
+        
+        if not pd.isna(column_name):
+            if not pd.isna(expected_dtype):
+                if not pd.isna(target_table_name):
                     column_name, expected_dtype, target_table_name = column_name.strip(), expected_dtype.lower().strip(), target_table_name.strip()
                 else:
                     logging.warning("Source Table Name empty, Skipping filter and original data will be saved")
@@ -325,24 +357,35 @@ def extract_and_apply_filters(table_name, df, filters):
             all_filtered_df[target_table_name] = df
             continue
 
-        # filters
-        condition_type = filter['condition_type'].strip().lower() if isinstance(filter['condition_type'], str) else filter['condition_type']
-        condition_global_var = filter['condition_value']
-        condition_value_row = global_params.loc[global_params['column_name'].str.lower().str.strip() == condition_global_var, 'value']
-        
-        if condition_value_row is not None:
-            condition_value = condition_value_row.iloc[0]
-        else:
-            logging.warning(f"condition_value: {condition_global_var} not present in global parameters")
-            all_filtered_df[target_table_name] = df
-            continue
+        condition_value = filterr['condition_value'] if (not pd.isna(filterr['condition_value'])) else None
+        condition_value = condition_value.strip() if isinstance(condition_value, str) else condition_value
+        condition_value_type = filterr['condition_value_type']
+        if not pd.isna(condition_value_type):
+            condition_value_type = condition_value_type.strip().lower().replace(' ','_')
+            
+        condition_type = filterr['condition_type'].strip().lower() if isinstance(filterr['condition_type'], str) else filterr['condition_type']
+        if condition_value_type == 'global_variable':
+            condition_global_var = condition_value
+            if condition_global_var is None:
+                all_filtered_df[target_table_name] = df
+                logging.warning(f"Global Variable not defined: {filterr['condition_value']}")
+                continue
+          
+            condition_value_row = global_params.loc[global_params['column_name'].str.lower().str.strip() == condition_global_var, 'value']
+            
+            if condition_value_row is not None:
+                condition_value = condition_value_row.iloc[0]
+            else:
+                logging.warning(f"condition_value: {condition_global_var} not present in global parameters")
+                all_filtered_df[target_table_name] = df
+                continue
           
         df = filter_data(table_name, df, column_name, expected_dtype, condition_type, condition_value)
-        logging.warning("   ")
+        
     
     # at the end of loop add filtered df to all_filtered_df
     all_filtered_df[target_table_name] = df
-    logging.warning(f"Filtered table: {table_name}")
+    logging.warning(f"Filtered table: {table_name}: {len(df)}")
     
 
 global process_db_filters
@@ -371,9 +414,12 @@ def process_db_filters(all_db_filters, location):
          
         table_group = db_group.groupby("source_name")
 
+        logging.warning("    ")
         # Iterate over each table
         for table, filters in table_group:
             
+            logging.warning("   ")
+            logging.warning("   ")
             logging.warning(f"Reading {table}")
             table_name = table.lower()
 
@@ -387,7 +433,6 @@ def process_db_filters(all_db_filters, location):
 
             extract_and_apply_filters(table_name, df, filters)
 
-            logging.warning("   ")
 
         connection.close()
         engine.dispose()
@@ -424,13 +469,21 @@ def process_sftp_filters(all_sftp_filters):
         
         # Iterate over each file
         for file, filters in file_group:
-          
-            path = filters.loc[filters['source_name'] == file, 'source_connection_location'].iloc[0]
+        
+            path = filters.loc[filters['source_name'] == file, 'source_connection_location']
+            if path.empty:
+                logging.warning(f"{file}: Path not specified")
+                continue
+              
+            path = path.iloc[0]
             file_path = os.path.join(path, file)
 
             _, file_extension = os.path.splitext(file_path)
 
+            logging.warning("   ")
+            logging.warning("   ")
             logging.warning(f"Reading {file}")
+            
             # File read
             try:    
                 with sftp_client.file(file_path, 'rb') as remote_file:
@@ -448,7 +501,6 @@ def process_sftp_filters(all_sftp_filters):
                     continue
     
                 logging.warning("File read successfully")
-                logging.warning("   ")
 
             except FileNotFoundError as e:
                 logging.warning(f"File not found: {e}, skipped the {file}")
@@ -460,12 +512,7 @@ def process_sftp_filters(all_sftp_filters):
             logging.warning(f"No of filter in {file}: {len(filters)} ")
 
             extract_and_apply_filters(file, df, filters)
-
-            # write df to local
-            # df.to_excel(f"{target_table_name}.xlsx", index = False)
-            # logging.warning(f"Done for {file}, file:{target_table_name}.xlsx saved")
-            logging.warning("    ")
-        
+                
         ssh_client.close()
         sftp_client.close()
         logging.warning(f"Done for {connection_name}")
@@ -506,6 +553,8 @@ def filter_source(all_filters):
         logging.warning("Error while groupby and filtering with db/sftp and location")
         return
 
+    logging.warning("   ")
+    logging.warning("   ")
     if internal_db_filters_to_perform.ngroups:
         logging.warning("Started Internal Database Validation")
         process_db_filters(internal_db_filters_to_perform, 'INTERNAL')
@@ -532,21 +581,22 @@ def filter_source(all_filters):
     
     if all_filtered_df:
         for table_name, temp_df in all_filtered_df.items():
-            try:
-                # save to Raw Data Directory
-                df_save_path_parquet = os.path.join(parquet_raw_path, f"{table_name}.parquet")
-                temp_table = pa.Table.from_pandas(temp_df)
-                pq.write_table(temp_table, df_save_path_parquet)
-
-                # save to local for testing
-                # output_file = fr"/home/azureuser/DataFrameWork Testing/Filtered Source/{table_name}.xlsx"
-                # excel_buffer = BytesIO()
-                # temp_df.excel(excel_buffer, index=False)
-                # excel_buffer.seek(0)
-                # sftp_client.putfo(excel_buffer, output_file)
-                logging.warning(f"Parquet saved for {table_name}, {df_save_path_parquet}")
-            except Exception as e:
-                logging.warning(f"Error in saving parquet for {table_name}, {df_save_path_parquet}")
+            # save to Raw Data Directory
+            df_save_path_parquet = os.path.join(parquet_raw_path, f"{table_name}.parquet")
+            temp_table = pa.Table.from_pandas(temp_df)
+            pq.write_table(temp_table, df_save_path_parquet)
+          
+            # save to local for testing
+            output_file = fr"/home/azureuser/DataFrameWork Testing/Latest/Filtered Raw Data/{table_name}.csv"
+            excel_buffer = BytesIO()
+            temp_df.to_csv(excel_buffer, index=False)
+            excel_buffer.seek(0)
+            main_sftp_client.putfo(excel_buffer, output_file)
+                
+            # path = r"C:\Users\BAnilKumar\Downloads\dq\Filtered Raw Data"
+            # path = os.path.join(path,f"{table_name}.xlsx")
+            # temp_df.to_excel(path, index = False)
+            logging.warning(f"Saved: {table_name}")
     else:
         logging.warning("No data to be saved.")
 
@@ -569,45 +619,23 @@ except FileNotFoundError:
 except OSError as e:
     logging.warning(f"Error deleting Raw Data directory: {e}")
 
-sftp_creds = Data1
+global main_sftp_client, main_ssh_client
+main_sftp_client, main_ssh_client = get_sftp_connection(Sftp_Name)
 
-# if Sftp_Name is None or Sftp_Name == "":
-#     logging.warning("Terminating because sftp name not found")
-#     raise Exception("Terminating because sftp name not found")
-  
-try:
-    # filtered_sftp_df =sftp_creds[sftp_creds['variable_name'] == 'Sftp Name'].reset_index(drop=True)
-    # index = filtered_sftp_df[filtered_sftp_df['variable_value'] == Sftp_Name].index[0]
-    
-    hostname = sftp_creds.loc[sftp_creds["variable_name"] == "Hostname", "variable_value"].iloc[0]
-    username = sftp_creds.loc[sftp_creds["variable_name"] == "Username", "variable_value"].iloc[0]
-    user_secret_key = sftp_creds.loc[sftp_creds["variable_name"] == "Password", "variable_value"].iloc[0]
-    port = sftp_creds.loc[sftp_creds["variable_name"] == "Port", "variable_value"].iloc[0]
-    
-    global sftp_client
-    ssh_client = paramiko.SSHClient()
-    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    logging.warning(f"Connecting to the SFTP server: {username}...")
-    ssh_client.connect(hostname=hostname, username=username, password=user_secret_key, port=port, banner_timeout=200)
-    sftp_client = ssh_client.open_sftp()
-    logging.warning("Connected to the SFTP server.")
-
-except ssh_exception.AuthenticationException as e:
-    logging.warning(f"AuthenticationException Connnecting to the sftp: {username}: {e}")
-
-except Exception as e:
-    logging.warning(f"Error Connnecting to the sftp: {username}: {e}")
+if main_sftp_client is None:
+    raise Exception(f"Couldn't connect to SFTP: {Sftp_Name}")
 
 # Read Antares Master File
 try:
-    with sftp_client.file(config_file_path, 'rb') as remote_file:
+    with main_sftp_client.file(config_file_path, 'rb') as remote_file:
         file_data = remote_file.read()
     master_file_buffer = BytesIO(file_data)
 except FileNotFoundError:
     raise Exception(f"File not found:{config_file_path}")
-
+except Exception as e:
+    raise Exception(f"Error in reading config file: {e}")
+  
 # Source Data definition
-source_data_definition = Data2.copy()
 
 global config_file, master_repository, global_params
 try:
@@ -615,6 +643,10 @@ try:
     global_params = config_file.parse('global_parameter')
 except Exception as e:
     raise Exception(f"Error reading configs file/global parameter sheet: {e}")
+
+
+source_data_definition = Data1
+mapping_set = Data2
 
 global_params.columns = global_params.columns.str.replace(" ","_").str.lower()
 
@@ -636,6 +668,6 @@ output_data = pd.DataFrame({
 output_data["id"] = output_data.index + 1
 output_data.insert(0, 'id', output_data.pop('id'))
 
-ssh_client.close()
-sftp_client.close()
+main_ssh_client.close()
+main_sftp_client.close()
 logging.warning("Source Filter Completed.")

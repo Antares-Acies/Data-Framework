@@ -5,7 +5,7 @@ It generates a Data Quality (DQ) Report that highlights any discrepancies or iss
 """
 
 global create_engine, inspect
-global paramiko, ssh_exception, BytesIO
+global paramiko, ssh_exception, BytesIO, json
 global datetime, pytz
 global pa, pq
 
@@ -23,6 +23,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import shutil
 import pytz
+import json
+global PLATFORM_FILE_PATH, decrypt_existing_sftp_credentials
+from config.settings.base import PLATFORM_FILE_PATH
+from Core.users.computations.sftp_credential_encryption import decrypt_existing_sftp_credentials
 
 global log_error
 def log_error(source_table_name=None, 
@@ -64,14 +68,25 @@ def map_datatype(value):
     """
 
     if value == "datetime":
-        return pd.to_datetime
+        return object
     if value == "float":
         return float
-    
     return str
 
+global format_value
+def format_value(value):
+    try:
+        value = pd.to_datetime(value, errors='coerce').strftime('%Y-%m-%d %H:%M:%S')
+        return value
+    except ValueError:
+        return value
+    # if isinstance(value, pd.Timestamp):
+    #     logging.warning('called and changed')
+    #     return value.strftime('%Y-%m-%d %H:%M:%S')
+    # return value
+
 global convert_datatype
-def convert_datatype(value, type):
+def convert_datatype(value, expected_dtype):
     """
     Convert the value into the desired type.
 
@@ -80,23 +95,147 @@ def convert_datatype(value, type):
     - type (str): The target datatype.
     """
 
-    if type == "datetime":
+    if expected_dtype == "datetime":
         dt_value = pd.to_datetime(value, errors='coerce')
         if pd.isna(dt_value):
             return None  # Handle NaT values
-        return dt_value.strftime('%Y-%m-%d')
-    if type == "float":
+        return dt_value.strftime('%Y-%m-%d %H:%M:%S')
+    
+    if expected_dtype == "float":
         return float(value)
+    
     return str(value)
 
+global is_float
+def is_float(value):
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
+
+global is_string
+def is_string(value):
+    return isinstance(value, str)
+
+global is_datetime
+def is_datetime(value):
+    try:
+        pd.to_datetime(value)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+global filter_data
+def filter_data(df, filter_details):
+    """
+    Return filtered df or error_message in case of error
+    """
+
+    filter_column, filter_condition_datatype, filter_condition_type, filter_condition_value, filter_value_type = filter_details
+    
+    if not pd.isna(filter_column):
+        filter_column = filter_column.strip()
+
+    if pd.isna(filter_value_type):
+        error_msg = f"Filter Value Type is empty, skipping this validation"
+        return None, error_msg
+
+    logging.warning("Filter Details: ")    
+    logging.warning(f"Filter column: {filter_column} Datatype: {filter_condition_datatype}")    
+    logging.warning(f"Filter Condition Type: {filter_condition_type} Value Type:{filter_value_type}")    
+    logging.warning(f"Filter Condition Value: {filter_condition_value}")    
+
+    filter_value_type = filter_value_type.strip().lower().replace(" ","_")
+    filter_condition_value = filter_condition_value.strip() if isinstance(filter_condition_value, str) else filter_condition_value
+    filter_condition_type = filter_condition_type.strip().lower()
+    filter_condition_datatype = filter_condition_datatype if pd.isna(filter_condition_datatype) else filter_condition_datatype.lower().strip()
+
+    
+    if filter_value_type == 'global_variable':
+        global_var = global_params.loc[global_params['column_name'] == filter_condition_value, 'value']
+        if not global_var.empty:
+            filter_condition_value = global_var.iloc[0]
+        else:
+            error_msg = f"Global variable defined for filter not avaiable in Global Parameter Sheet, skipping this validation"
+            filtered_df = None
+
+    if filter_value_type == 'mapping_set':
+        logging.warning(f"Filtering with Mapping Set: {filter_condition_value}")
+        try:
+            mapping_conditions_df = mapping_set.loc[mapping_set['mapping_set'] == filter_condition_value]
+        except KeyError as e:
+            raise Exception(f"here:{mapping_set.columns}")
+        if not mapping_conditions_df.empty:
+            filtered_df = df
+            mapping_conditions_df_group = mapping_conditions_df.groupby('mapping_type')
+            for col, mapping_conditions in mapping_conditions_df_group:
+                if col in filtered_df.columns:
+                    mapping_values = list(mapping_conditions['mapping_criteria'])
+                    if filter_condition_type == 'contains':
+                        filtered_df = filtered_df[filtered_df[col].isin(mapping_values)]
+                    else:
+                        filtered_df = filtered_df[~(filtered_df[col].isin(mapping_values))]
+                    logging.warning(f"Filter col: {col} with Values: {mapping_values}")
+                else:
+                    error_msg = f"Columns defined for filter using mapping does not exist in the table, skipping this validation"
+                    filtered_df = None
+                                        
+        else:
+            error_msg = f"Mapping set defined for filter not avaiable in Mapping set table, skipping this validation"
+            filtered_df = None
+
+    elif filter_value_type == 'column':
+        if filter_condition_type == 'equal to' or filter_condition_type == 'contains':
+            filtered_df = df[df[filter_column] == df[filter_condition_value]]
+        elif filter_condition_type == 'not equal to' or filter_condition_type == 'does not contains':
+            filtered_df = df[df[filter_column] != df[filter_condition_value]]
+        elif filter_condition_type == 'greater than':
+            filtered_df = df[df[filter_column] > df[filter_condition_value]]
+        elif filter_condition_type == 'greater than equal to':
+            filtered_df = df[df[filter_column] >= df[filter_condition_value]]
+        elif filter_condition_type == 'less than':
+            filtered_df = df[df[filter_column] < df[filter_condition_value]]
+        elif filter_condition_type == 'less than equal to':
+            filtered_df = df[df[filter_column] <= df[filter_condition_value]]
+        else:
+            error_msg = f"Unknown type of filter_condition_type: {filter_condition_type}"
+            filtered_df = None
+
+    elif filter_value_type == 'value' or filter_value_type == 'global_variable':
+        # Map datatype of column
+        if not pd.isna(filter_condition_datatype):
+            if filter_condition_datatype.lower() == 'datetime':
+                df[filter_column] = pd.to_datetime(df[filter_column])
+            if filter_condition_datatype == 'float':
+                filter_condition_value = float(filter_condition_value)
+                df[filter_column] = df[filter_column].astype(float)
+            
+        if filter_condition_type == 'equal to' or filter_condition_type == 'contains':
+            filtered_df = df[df[filter_column] == filter_condition_value]
+        elif filter_condition_type == 'not equal to' or filter_condition_type == 'does not contains':
+            filtered_df = df[df[filter_column] != filter_condition_value]
+        elif filter_condition_type == 'greater than':
+            filtered_df = df[df[filter_column] > filter_condition_value]
+        elif filter_condition_type == 'greater than equal to':
+            filtered_df = df[df[filter_column] >= filter_condition_value]
+        elif filter_condition_type == 'less than':
+            filtered_df = df[df[filter_column] < filter_condition_value]
+        elif filter_condition_type == 'less than equal to':
+            filtered_df = df[df[filter_column] <= filter_condition_value]
+        else:
+            error_msg = f"Unknown type of filter_condition_type: {filter_condition_type}"
+            filtered_df = None
+
+    return filtered_df, None
 
 global validate_data
-def validate_data(source, df, column_name, expected_dtype, condition_type, condition_value, check_type, unique_identifier_column, error_reporting_tag, error_type, indices_to_drop):
+def validate_data(file, df, filter_details, check_details, master_check_details, check_type, unique_identifier_column, error_reporting_tag, error_type, indices_to_drop):
     """
     Validate Data and returns the filtered DataFrame.
 
     Parameters:
-    - source (str): Name of the source table.
+    - file (str): Name of the table.
     - df (DataFrame): DataFrame containing the data to be validated.
     - column_name (str): Name of the column to be validated.
     - expected_dtype (str): Expected datatype of the column.
@@ -113,99 +252,294 @@ def validate_data(source, df, column_name, expected_dtype, condition_type, condi
     - Updates the indices_to_drop set with indices of rows that fail FATAL checks.
     """
 
+    # if filter_column is defined then filter the df first
+    column_name, condition_datatype, condition_type, condition_value, check_value_type = check_details
+    
+    filter_column, filter_condition_datatype, filter_condition_type, filter_condition_value, filter_value_type = filter_details
+    if not (pd.isna(filter_column) and pd.isna(filter_condition_datatype) and pd.isna(filter_condition_type) and pd.isna(filter_condition_value) and pd.isna(filter_value_type)):
+        logging.warning("Filtering the df")
+        filtered_df, error_msg = filter_data(df, filter_details)
+        if error_msg is not None:
+            logging.warning(error_msg)
+            log_error(file, check_type, error_reporting_tag, dq_column_name=column_name, error_message = error_msg, error_type=error_type)
+            return
+        logging.warning("Filtered the df")
+    else:
+        filtered_df = df
+    
+    # variables to hold the duplicates, failed, datatype_failed and fail_indices values
     duplicates = pd.DataFrame()
     fails_df = pd.DataFrame()
-    new_df = pd.DataFrame()
+    datatype_fails_df = pd.DataFrame()
+    fail_indices = None
 
-    if 'date' in column_name:
-        if not pd.isna(condition_value):
-            if isinstance(condition_value, str):
-                date_obj = datetime.strptime(condition_value, "%Y-%m-%d %H:%M:%S")
-                condition_value = date_obj.strftime("%Y-%m-%d")
-            else:
-                condition_value = condition_value.strftime("%Y-%m-%d")
-            df[column_name] = pd.to_datetime(df[column_name], errors='coerce', dayfirst=True).dt.strftime('%Y-%m-%d')
+    # if 'date' in column_name:
+    #     if not pd.isna(condition_value):
+    #         if isinstance(condition_value, str):
+    #             date_obj = datetime.strptime(condition_value, "%Y-%m-%d %H:%M:%S")
+    #             condition_value = date_obj.strftime("%Y-%m-%d")
+    #         else:
+    #             condition_value = condition_value.strftime("%Y-%m-%d")
+    #         filtered_df[column_name] = pd.to_datetime(filtered_df[column_name], errors='coerce', dayfirst=True).dt.strftime('%Y-%m-%d')
     
     logging.warning(f"Validating {check_type}: {column_name} '{condition_type}'  '{condition_value}'")
 
-    t_check_type = check_type.replace(" ", "_").lower()
+    t_check_type = check_type.replace(" ", "_").lower().strip()
 
+    # For null check
     if t_check_type == "null_check":
-        fails_df = df[(df[column_name].isna()) | (df[column_name] == '')]
+        fails_df = filtered_df[(filtered_df[column_name].isna()) | (filtered_df[column_name] == '')]
         fail_indices = fails_df.index.tolist()
 
+    # For unique check, keep first instance and drop all other 
     elif t_check_type == 'unique_check':
-        duplicates = df[df.duplicated(subset=[column_name], keep='first')]
+        duplicates = filtered_df[filtered_df.duplicated(subset=[column_name], keep='first')]
         fail_indices = fails_df.index.tolist()
 
+
+    # For master check
     elif t_check_type == 'master_check':
 
-        all_conditions = list(master_repository.loc[master_repository['master_name'] == condition_value, 'source_column_value'])   
-        all_conditions_lower = [str(condition).lower() if isinstance(condition, str) else condition for condition in all_conditions]
-
-        if not all_conditions_lower:
-            logging.warning(f"Values for Master Check not defined in Master Repository")
+        master_source, master_table, master_primary_key_column, master_primary_key_value, master_value_column = master_check_details
+        
+        if pd.isna(master_source):
+            logging.warning("Master Source not found for Master Check")
+            log_error(file, check_type, error_reporting_tag, dq_column_name=column_name, error_message = "Master Source not found for Master Check", error_type=error_type)
+            return
+        
+                
+        if pd.isna(master_table) or pd.isna(master_value_column):
+            logging.warning("Master Check is not configured properly")
+            log_error(file, check_type, error_reporting_tag, dq_column_name=column_name, error_message = "Master Check is not configured properly", error_type=error_type)
             return
 
-        non_none_types = [type(x) for x in all_conditions_lower if x is not None]
+        master_source = master_source.lower().replace(" ","_")
+        
+        if master_source == 'config_file':
+            if master_table not in all_config_masters.keys(): 
+                logging.warning(f"Master table not found: {master_table}")
+                log_error(file, check_type, error_reporting_tag, dq_column_name=column_name, error_message = f"Master table not found: {master_table}", error_type=error_type)
+                return
+            master_table_df = all_config_masters[master_table]
+            logging.warning("Picked up Master Table from config file")
+
+        elif master_source == 'source_data_table':
+            if master_table not in all_source_table_masters.keys(): 
+                logging.warning(f"Master table not found: {master_table}")
+                log_error(file, check_type, error_reporting_tag, dq_column_name=column_name, error_message = f"Master table not found: {master_table}", error_type=error_type)
+                return
+            master_table_df = all_source_table_masters[master_table]
+            logging.warning("Picked up Master Table from Filtered Raw Data")
+
+        elif master_source == 'system_master':
+            master_value_column = master_value_column.lower().replace(" ",'_')
+            if not pd.isna(master_primary_key_column):
+                master_primary_key_column = master_primary_key_column.lower().replace(" ",'_')
+            if master_table not in all_system_masters.keys(): 
+                logging.warning(f"Master table not found: {master_table}")
+                log_error(file, check_type, error_reporting_tag, dq_column_name=column_name, error_message = f"Master table not found: {master_table}", error_type=error_type)
+                return
+            master_table_df = all_system_masters[master_table]
+            logging.warning("Picked up Master Table from Filtered Raw Data")
+
+        else:
+            logging.warning("Unknown source for Master table")
+            log_error(file, check_type, error_reporting_tag, dq_column_name=column_name, error_message = "Unknown source for Master table", error_type=error_type)
+            return
+
+        if master_value_column not in master_table_df.columns:
+            logging.warning(f"Master Check: 'Master Value Column':{master_value_column} does not exist in Master Table: {master_table}")
+            log_error(file, check_type, error_reporting_tag, dq_column_name=column_name, error_message = f"Master Check: 'Master Value Column':{master_value_column}  does not exist in Master Table: {master_table}", error_type=error_type)
+            return
+
+        # Get the condition from master table to check against
+        
+        if not pd.isna(master_primary_key_column) and not pd.isna(master_primary_key_value):
+            if master_primary_key_column not in master_table_df.columns:
+                logging.warning(f"Master check: 'Master Primary Key Column':{master_primary_key_column} does not exist in Master Table: {master_table}")
+                log_error(file, check_type, error_reporting_tag, dq_column_name=column_name, error_message = f"Master check: 'Master Primary Key Column':{master_primary_key_column} does not exist in Master Table: {master_table}", error_type=error_type)
+                return
+            else:
+                all_conditions = list(master_table_df.loc[master_table_df[master_primary_key_column.strip()] == master_primary_key_value, master_value_column])   
+        else:
+            all_conditions = master_table_df[master_value_column.strip()].unique()  
+        
+        if all_conditions is None:
+            logging.warning(f"Values for Master Check Master Name: {master_primary_key_value} not defined in master table: {master_table}")
+            logging.warning("Not Validated")
+            log_error(file, check_type, error_reporting_tag, dq_column_name=column_name, error_message = f"Values for Master Check Master Name: {master_primary_key_value} not defined in master table: {master_table}", error_type=error_type)
+            return
+        logging.warning(f"Validating Master Check values: {all_conditions}")
+
+        temp_all_conditions = all_conditions.copy()
+        all_conditions_lower = [str(condition).strip().lower() if isinstance(condition, str) else condition for condition in temp_all_conditions]
+        keep_null = False
+        if None in temp_all_conditions:
+            null_index = temp_all_conditions.index(None)
+            temp_all_conditions.pop(null_index)
+            keep_null = True
+            
+        non_none_types = [type(x) for x in temp_all_conditions if not pd.isna(x)]
         if not non_none_types:
-            logging.warning(f"Values for Master Check not defined in Master Repository")
+            logging.warning(f"Values for Master Check Master Name: {master_primary_key_value} not defined in master table: {master_table}")
+            log_error(file, check_type, error_reporting_tag, dq_column_name=column_name, error_message = f"Values for Master Check Master Name: {master_primary_key_value} not defined in master table: {master_table}", error_type=error_type)
             return
-          
-        temp_series = df[column_name].apply(lambda x: x.lower() if isinstance(x, str) else x)
-        temp_series = temp_series.astype(non_none_types[0])
-      
-        fails_df = df[~(temp_series.isin(all_conditions_lower))]
-        fail_indices = fails_df.index.tolist()
-        condition_value = all_conditions
 
-    # Validate condition_type/condition_value
-    elif (condition_type is None and condition_value is not None) and (condition_type is None and condition_value is not None) :
-        log_error(source, check_type, error_reporting_tag_value=None, error_message = "condition_type/condition_value is empty")
+        if not pd.isna(condition_datatype):
+            if condition_datatype == 'datetime':
+                filtered_df[column_name] = pd.to_datetime(filtered_df[column_name])
+            if condition_datatype == 'float':
+                if filtered_df[column_name].dtype in ['int64', 'float64']:
+                    try:
+                        temp_all_conditions = list(map(float, temp_all_conditions))
+                        filtered_df[column_name] = filtered_df[column_name].astype(float)
+                    except ValueError:
+                        if isinstance(temp_all_conditions[0], str):
+                            filtered_df[column_name] = filtered_df[column_name].astype(str)
+
+        else:
+            logging.warning(f"Condition Datatype is not defined, skipping this validation")
+            return
+
+        if keep_null:
+            temp_df = filtered_df.copy()
+            temp_df = temp_df.dropna(subset=[column_name])
+            fails_df = temp_df[~(temp_df[column_name].isin(temp_all_conditions))]
+        else:    
+            fails_df = filtered_df[~(filtered_df[column_name].isin(temp_all_conditions))]
+            
+        fail_indices = fails_df.index.tolist()
+
+    elif (pd.isna(condition_type) and not pd.isna(condition_value)) and (not pd.isna(condition_type) and pd.isna(condition_value)) :
         logging.warning("condition_type/condition_value empty")
+        log_error(file, check_type, error_reporting_tag, error_message = "condition_type/condition_value is empty", error_type=error_type)
         return
 
-    # Validation 
-    elif condition_type and condition_value:
-        try: 
-            try:
-                mapped_type = map_datatype(expected_dtype)
-                converted_condition_value = convert_datatype(condition_value, expected_dtype)
-            except Exception as e:
-                logging.warning(f"{e}")
-                log_error(source, check_type, error_reporting_tag_value=None, unique_identifier=None, dq_column_name=column_name, error_message = f"Invalid Condition Value: {condition_value}, expected: {expected_dtype}, got:{str(type(condition_value))}")
+    # all value checks
+    elif not pd.isna(condition_type) and not pd.isna(condition_value):
+
+        logging.warning(f"Validating Check Value Type: {check_value_type}")
+        if pd.isna(check_value_type):
+            check_value_type = ""
+
+
+        check_value_type = check_value_type.strip().lower().replace(" ","_")
+        if check_value_type == 'global_variable':
+            global_var = global_params.loc[global_params['column_name'] == condition_value, 'value']
+            g_condition_value = condition_value
+            if not global_var.empty:
+                condition_value = global_var.iloc[0]
+            else:
+                logging.warning("Global variable defined not avaiable in Global Parameter Sheet, skipping this validation")
+                log_error(file, check_type, error_reporting_tag, unique_identifier=None, dq_column_name=column_name, error_message = "Global variable defined not avaiable in Global Parameter Sheet, skipping this validation", error_type=error_type)
+                return
+            logging.warning(f"condition_value fetched for global_variable: {g_condition_value}: {condition_value}")
+
+        if check_value_type == 'column':
+            if condition_value not in filtered_df.columns:
+                logging.warning(f"Condition Column does not exist: {condition_value}, skipping this validation")
+                log_error(file, check_type, error_reporting_tag, unique_identifier=None, dq_column_name=column_name, error_message = f"Condition Column does not exist: {condition_value}, skipping this validation", error_type=error_type)
                 return
             
-            if condition_type == 'equal to':
-                fails_df = df[df[column_name].astype(mapped_type) == converted_condition_value]
-                fail_indices = fails_df.index.tolist()
-            elif condition_type == 'not equal to':
-                fails_df = df[df[column_name].astype(mapped_type) != converted_condition_value]            
-                fail_indices = fails_df.index.tolist()          
-            elif condition_type == 'greater than':
-                fails_df = df[df[column_name].astype(mapped_type) > converted_condition_value]
-                fail_indices = fails_df.index.tolist()
-            elif condition_type == 'greater than equal to':
-                fails_df = df[df[column_name].astype(mapped_type) >= converted_condition_value]
-                fail_indices = fails_df.index.tolist()
-            elif condition_type == 'less than':
-                fails_df = df[df[column_name].astype(mapped_type) < converted_condition_value]
-                fail_indices = fails_df.index.tolist()
-            elif condition_type == 'less than equal to':
-                fails_df = df[df[column_name].astype(mapped_type) <= converted_condition_value]
-                fail_indices = fails_df.index.tolist()
+            t_condition_type = condition_type.strip().lower()
+            if t_condition_type == 'equal to' or condition_type == 'contains':
+                fails_df = filtered_df[filtered_df[column_name] == filtered_df[condition_value]]
+            elif t_condition_type == 'not equal to' or condition_type == 'does not contains':
+                fails_df = filtered_df[filtered_df[column_name] != filtered_df[condition_value]]
+            elif t_condition_type == 'greater than':
+                fails_df = filtered_df[filtered_df[column_name] > filtered_df[condition_value]]
+            elif t_condition_type == 'greater than equal to':
+                fails_df = filtered_df[filtered_df[column_name] >= filtered_df[condition_value]]
+            elif t_condition_type == 'less than':
+                fails_df = filtered_df[filtered_df[column_name] < filtered_df[condition_value]]
+            elif t_condition_type == 'less than equal to':
+                fails_df = filtered_df[filtered_df[column_name] <= filtered_df[condition_value]]
             else:
-                logging.warning("Unknown type of condition_type")
-                log_error(source, check_type, error_reporting_tag_value=None, unique_identifier=None, dq_column_name=column_name, error_message = "Unknown type of condition_type")
+                logging.warning(f"Unknown type of condition_type: {t_condition_type}")
+                log_error(file, check_type, error_reporting_tag, unique_identifier=None, dq_column_name=column_name, error_message = f"Unknown type of condition_type: {condition_type}", error_type=error_type)
                 return
-        except TypeError as e:
-            logging.warning(f"Error while validating data: {e}")
-            log_error(source, check_type, error_reporting_tag_value=None, unique_identifier=None, dq_column_name=column_name, error_message = f"Invalid comparison between {condition_value} and column:{column_name} of type:{df[column_name].dtype}")
-            return  
+            
+            fail_indices = fails_df.index.tolist()
+            
+        elif check_value_type == 'mapping_set':
+            try:
+                mapping_conditions = mapping_set.loc[mapping_set['mapping_set'] == condition_value, 'mapping_criteria']
+            except KeyError as e:
+                raise Exception(f"here:{mapping_set.columns}")
+            if not mapping_conditions.empty:
+                mapping_values = list(mapping_conditions)
+                if condition_type == 'contains':
+                    filtered_df = filtered_df[[column_name].isin(mapping_values)]
+                else:
+                    filtered_df = filtered_df[~(filtered_df[column_name].isin(mapping_values))]
+            else:
+                logging.warning(f"Mapping set defined:{condition_value} not avaiable in Mapping set table, skipping this validation")
+                log_error(file, check_type, error_reporting_tag, unique_identifier=None, dq_column_name=column_name, error_message = f"Mapping set defined:{condition_value} not avaiable in Mapping set table, skipping this validation", error_type=error_type)
+                return
 
-    else:
+        else:
+            if pd.isna(condition_value):
+                logging.warning("Condition Value is not defined for Value Check")
+                log_error(file, check_type, error_reporting_tag, unique_identifier=None, dq_column_name=column_name, error_message = "Condition Value is not defined for Value Check", error_type=error_type)
+                return
+                
+            if check_value_type == "":
+                logging.warning("Condition Value Type is not defined for Value Check")
+                log_error(file, check_type, error_reporting_tag, unique_identifier=None, dq_column_name=column_name, error_message = "Condition Value is not defined for Value Check", error_type=error_type)
+                return
+                
+            if pd.isna(condition_type):
+                logging.warning("Condition Type is not defined for Value Check")
+                log_error(file, check_type, error_reporting_tag, unique_identifier=None, dq_column_name=column_name, error_message = "Condition Type is not defined for Value Check", error_type=error_type)
+                return
 
-        log_error(source, check_type, error_reporting_tag_value=None, error_message = "condition_type and condition_value are empty")
+            try: 
+                
+                if not pd.isna(condition_datatype):
+                    if condition_datatype == 'datetime':
+                        filtered_df[column_name] = pd.to_datetime(filtered_df[column_name])
+                    if condition_datatype == 'float':
+                        condition_value = float(condition_value)
+                        filtered_df[column_name] = filtered_df[column_name].astype(float)
+                      
+                t_condition_type = condition_type.strip().lower()
+                if t_condition_type == 'equal to':
+                    fails_df = filtered_df[filtered_df[column_name] == condition_value]
+                elif t_condition_type == 'not equal to':
+                    fails_df = filtered_df[filtered_df[column_name] != condition_value]
+                elif t_condition_type == 'greater than':
+                    fails_df = filtered_df[filtered_df[column_name] > condition_value]
+                elif t_condition_type == 'greater than equal to':
+                    fails_df = filtered_df[filtered_df[column_name] >= condition_value]
+                elif t_condition_type == 'less than':
+                    fails_df = filtered_df[filtered_df[column_name] < condition_value]
+                elif t_condition_type == 'less than equal to':
+                    fails_df = filtered_df[filtered_df[column_name] <= condition_value]
+                else:
+                    logging.warning(f"Unknown type of condition_type: {t_condition_type}")
+                    log_error(file, check_type, error_reporting_tag, unique_identifier=None, dq_column_name=column_name, error_message = f"Unknown type of condition_type: {condition_type}", error_type=error_type)
+                    return
+                
+                fail_indices = fails_df.index.tolist()
+            except TypeError as e:
+                logging.warning(f"Invalid comparison: {condition_type} between {condition_value} of type: {type(condition_value)} and column:{column_name} of type:{filtered_df[column_name].dtype} {e}")
+                log_error(file, check_type, error_reporting_tag, unique_identifier=None, dq_column_name=column_name, error_message = f"Invalid comparison: {condition_type} between {condition_value} of type: {type(condition_value)} and column:{column_name} of type:{filtered_df[column_name].dtype}", error_type=error_type)
+                return  
+        
+    elif not pd.isna(condition_datatype):
+        if not filtered_df[column_name].isna().all():
+            if condition_datatype == 'float':
+                datatype_fails_df = filtered_df[~(filtered_df[column_name].apply(is_float))]
+            elif condition_datatype == 'character':
+                datatype_fails_df = filtered_df[~(filtered_df[column_name].apply(is_string))]
+            elif condition_datatype == 'datetime':
+                datatype_fails_df = filtered_df[~(filtered_df[column_name].apply(is_datetime))]
+
+            fail_indices = datatype_fails_df.index.tolist()
+        logging.warning("Only Datatype Checked")
+        
+    else:   
+        log_error(file, check_type, error_reporting_tag, error_message = "condition_type and condition_value are empty", error_type=error_type)
         return
 
     # if fails log the error in report
@@ -213,24 +547,35 @@ def validate_data(source, df, column_name, expected_dtype, condition_type, condi
         for i, row in fails_df.iterrows():
             unique_identifier_value = row[unique_identifier_column]
             actual_condition_value = row[column_name]
-            error_reporting_tag_value = row.get(error_reporting_tag, None)
             if t_check_type == "null_check":
-                log_error(source, check_type, error_reporting_tag_value, unique_identifier_value, column_name, f"{check_type} failed", error_type)
+                log_error(file, check_type, error_reporting_tag, unique_identifier_value, column_name, f"{check_type} failed", error_type)
+            elif t_check_type == "master_check":
+                log_error(file, check_type, error_reporting_tag, unique_identifier_value, column_name, f"{check_type} failed: Master Table: {master_table} Master Name:{master_primary_key_value} actual:{actual_condition_value} condition_value:{all_conditions}", error_type)
             else:    
-                log_error(source, check_type, error_reporting_tag_value, unique_identifier_value, column_name, f"{check_type} failed: condition:{condition_type} actual:{actual_condition_value} condition_value:{condition_value}", error_type)
-    
+                if check_value_type == 'column':
+                    expected_condition_value = row[condition_value]
+                    log_error(file, check_type, error_reporting_tag, unique_identifier_value, column_name, f"{check_type} failed: condition:{condition_type} actual:{actual_condition_value} condition_value:{expected_condition_value}", error_type)                
+                else:
+                    log_error(file, check_type, error_reporting_tag, unique_identifier_value, column_name, f"{check_type} failed: condition:{condition_type} actual:{actual_condition_value} condition_value:{condition_value}", error_type)
+
     # if duplicates found, log in report
     if not duplicates.empty:
         for i,row in duplicates.iterrows():
             unique_identifier_value = row[unique_identifier_column]
             actual_condition_value = row[column_name]
-            error_reporting_tag_value = row.get(error_reporting_tag, None)
-            log_error(source, check_type, error_reporting_tag_value, unique_identifier_value, column_name, f"{check_type} failed", error_type)
-    
-    logging.warning("Validated condition_type/condition_value")
+            log_error(file, check_type, error_reporting_tag, unique_identifier_value, column_name, f"{check_type} failed", error_type)
 
-    if error_type.upper() == "FATAL": # If FATAL drop, add fail_indices to indices_to_drop
-        indices_to_drop.update(fail_indices)
+    # if datatype check failed
+    if not datatype_fails_df.empty:
+        for i, row in datatype_fails_df.iterrows():
+            unique_identifier_value = row[unique_identifier_column]
+            log_error(file, check_type, error_reporting_tag, unique_identifier_value, column_name, f"Datatype check failed: {condition_datatype}", error_type)
+    
+    logging.warning("Validated")
+
+    if fail_indices:
+        if error_type.upper() == "FATAL": # If FATAL drop, add fail_indices to indices_to_drop
+            indices_to_drop.update(fail_indices)
 
 
 global process_validations
@@ -245,32 +590,27 @@ def process_validations(all_validations):
     - Updates the all_validated_df dictionary with validated DataFrames.
     """
     
+    logging.warning("   ")
+    
     # Iterate over each table
     for file, validations in all_validations:
         
         file_path = os.path.join(parquet_raw_path,f"{file}.parquet")
 
+        # if file != 'pennant_pos_data':
+        #     continue
+
         # File read
         logging.warning(f"Reading {file}")
-        try:    
                         
-            if os.path.exists(file_path):
-                df = pd.read_parquet(file_path)
-            else:
-                logging.warning(f"Source data file for '{file}' not found. Skipping this source.")
-            
-            logging.warning("File read successfully")
-            logging.warning("   ")
-
-        except FileNotFoundError as e:
-            log_error(file, error_message=f"File not found: {e}, skipped the {file}")
-            logging.warning(f"File not found: {e}, skipped the {file}")
+        if os.path.exists(file_path):
+            df = pd.read_parquet(file_path)
+        else:
+            logging.warning(f"Source data file for '{file}' not found. Skipping this source.")
             continue
-
-        except Exception as e:
-            log_error(file, error_message=f"File not found: {e}, skipped the {file}")
-            logging.warning(f"Exception in sftp: {e}, skipped the {file}")
-            continue
+        
+        logging.warning("File read successfully")
+        logging.warning("   ")
 
         logging.warning(f"No of rows to validate {len(validations)} in {file}")
 
@@ -280,43 +620,89 @@ def process_validations(all_validations):
         for i,validation in validations.iterrows():
             logging.warning("   ")
             logging.warning(f"Validating row:{i+2}")
-            logging.warning(f"df shape :{df.shape}")
+    
+            # if i+2 != 148:
+            #     continue
+        
+            # pre filter values
+            filter_column = validation['filter_column']
+            filter_condition_datatype = validation['filter_condition_datatype']
+            filter_condition_type = validation['filter_condition_type']
+            filter_condition_value = validation['filter_condition_value']
+            filter_value_type = validation['filter_value_type']
 
+            # actual check values
             column_name = validation['source_column_name']
-            expected_dtype = validation['condition_datatype']
-            unique_identifier_column = validation['unique_identifier']
-            error_reporting_tag = validation.get('error_reporting_tag',"")
+            check_condition_datatype = validation['check_condition_datatype']
+            check_condition_type = validation['check_condition_type']
+            check_condition_value = validation['check_condition_value']
+            check_value_type = validation['check_value_type']
+
+            # for master check
+            master_source = validation["master_source"]	
+            master_table = validation["master_table"]	
+            master_value_column = validation["master_value_column"]	
+            master_primary_key_column = validation["master_primary_key_column"]	
+            master_primary_key_value = validation["master_primary_key_value"]
             
-            if column_name is not None:
-                if unique_identifier_column is not None:
-                    if expected_dtype is not None:
-                        column_name, unique_identifier_column, expected_dtype = column_name.strip(), unique_identifier_column.strip(), expected_dtype.lower()
-                        if error_reporting_tag is not None:
-                            error_reporting_tag = error_reporting_tag.strip()
-                    else:
-                        logging.warning("Column Datatype is empty, skipping this validation")
-                        continue
-                else:
-                    logging.warning("Unique Identifier Column is empty, skipping this validation")
-                    continue
-            else:
-                logging.warning("Column Name is empty, skipping this validation")
+            # other values
+            unique_identifier_column = validation['unique_identifier']
+            error_reporting_tag = validation['error_reporting_tag']
+            check_type = validation['check_type']
+            error_type = validation['error_type']
+
+            if pd.isna(column_name):
+                log_error(file, check_type, error_reporting_tag_value=None, unique_identifier=None, dq_column_name=column_name, error_message="Source Column Name is empty, skipping this validation", error_type=error_type)
+                logging.warning("Source Column Name is empty, skipping this validation")
                 continue
+            else:
+                column_name = column_name.strip()
+            
+            if pd.isna(unique_identifier_column):
+                log_error(file, check_type, error_reporting_tag_value=None, unique_identifier=None, dq_column_name=column_name, error_message="Unique Identifier Column is empty, skipping this validation", error_type=error_type)
+                logging.warning("Unique Identifier Column is empty, skipping this validation")
+                continue
+            else:
+                unique_identifier_column = unique_identifier_column.strip()
+            
+            if pd.isna(check_condition_datatype):
+                log_error(file, check_type, error_reporting_tag_value=None, unique_identifier=None, dq_column_name=column_name, error_message="Check Condition Datatype is empty, skipping this validation", error_type=error_type)
+                logging.warning("Check Condition Datatype is empty, skipping this validation")
+                continue
+            else:
+                check_condition_datatype = check_condition_datatype.lower().strip()
+            
+            if pd.isna(check_type):
+                log_error(file, check_type, error_reporting_tag_value=None, unique_identifier=None, dq_column_name=column_name, error_message="Check Type is empty, skipping this validation", error_type=error_type)
+                logging.warning("Check Type is empty, skipping this validation")
+                continue
+            else:
+                check_type = check_type.strip()
 
-            # condition to validate
-            condition_type = validation['condition_type'].strip().lower() if isinstance(validation['condition_type'], str) else validation['condition_type']
-            check_type = validation['check_type'].strip()
-            condition_value = validation['master_primary_key_value'] if check_type == "Master Check" else validation['condition_value']
-
-            df.columns = df.columns.str.strip()
+            if pd.isna(error_type):
+                log_error(file, check_type, error_reporting_tag_value=None, unique_identifier=None, dq_column_name=column_name, error_message="Error Type is empty, skipping this validation", error_type=error_type)
+                logging.warning("Error Type is empty, skipping this validation")
+                continue
+            else:
+                error_type = error_type.strip()    
+            
+            if not pd.isna(error_reporting_tag):
+                error_reporting_tag = error_reporting_tag.strip()
+            
+            filter_details = [filter_column, filter_condition_datatype, filter_condition_type, filter_condition_value, filter_value_type]
+            check_details = [column_name, check_condition_datatype, check_condition_type, check_condition_value, check_value_type]
+            master_check_details = [master_source, master_table, master_primary_key_column, master_primary_key_value, master_value_column]
+            
+            df.columns = df.columns.str.strip()            
             
             if column_name not in df.columns:
-                
                 log_error(file, check_type, error_reporting_tag_value=None, unique_identifier=None, dq_column_name=column_name, error_message=f"Column does not exist: {column_name}", error_type=error_type)
                 logging.warning(f"Column does not exist: {column_name}")
                 continue
-
-            validate_data(file, df, column_name, expected_dtype, condition_type, condition_value, check_type, unique_identifier_column, error_reporting_tag, error_type, indices_to_drop)
+            try:
+              validate_data(file, df, filter_details, check_details, master_check_details, check_type, unique_identifier_column, error_reporting_tag, error_type, indices_to_drop)
+            except Exception as e:
+              raise Exception(f"{i+2}: {e}")
             logging.warning("   ")
 
         if indices_to_drop:
@@ -344,7 +730,8 @@ def validate(all_checks):
     all_validated_df = {}
     # Drop rows where 'source_connection_type', 'source_table_name', 'source_column_name', or 'source_location' are empty
     all_checks = all_checks.copy()
-    
+    all_checks.columns = all_checks.columns.str.replace(" ","_").str.lower()
+    # raise Exception(all_checks.columns)
     try:
         all_checks = all_checks.dropna(subset=['source_table_name', 'source_column_name'])
     except KeyError as e:
@@ -369,62 +756,122 @@ def validate(all_checks):
                 temp_table = pa.Table.from_pandas(temp_df)
                 pq.write_table(temp_table, df_save_path_parquet)
 
+                # output_file = r"C:\Users\BAnilKumar\Downloads\dq\Error Free Data 2"
+                
+                # output_file = os.path.join(output_file,f"{table_name}.xlsx")
+                # temp_df.to_excel(output_file)
+
                 # save to local for testing
-                # output_file = fr"/home/azureuser/DataFrameWork Testing/Filtered Source/{table_name}.xlsx"
-                # excel_buffer = BytesIO()
-                # temp_df.excel(excel_buffer, index=False)
-                # excel_buffer.seek(0)
-                # sftp_client.putfo(excel_buffer, output_file)
-                logging.warning(f"Parquet saved for {table_name}, {df_save_path_parquet}")
+                output_file = fr"/home/azureuser/DataFrameWork Testing/Latest/Error Free Data/{table_name}.csv"
+                excel_buffer = BytesIO()
+                temp_df.to_csv(excel_buffer, index=False)
+                excel_buffer.seek(0)
+                sftp_client.putfo(excel_buffer, output_file)
+                logging.warning(f"Parquet saved for {table_name}, ")
             except Exception as e:
-                logging.warning(f"Error in saving parquet for {table_name}, {df_save_path_parquet}")
+                logging.warning(f"Error in saving parquet for {table_name}, {e}")
     else:
         logging.warning("No data to be saved.")
+
+
+global get_sftp_connection
+def get_sftp_connection(Sftp_Name):
+    """
+    Parameters:
+    - Sftp_Name (str): The name of the SFTP server to connect to.
+
+    Returns:
+    - sftp_client: Paramiko SFTP client object.
+    - ssh_client: Paramiko SSH client object.
+    """
+
+    sftp_file_path = f"{PLATFORM_FILE_PATH}sftp_remote_info.json"
+
+    try:
+        if os.path.exists(f"{sftp_file_path}"):
+            with open(f"{sftp_file_path}", "r+") as fout:
+                try:
+                    content = json.load(fout)
+                    encrypted_hostname = content[Sftp_Name]["hostname"]
+                    encrypted_username = content[Sftp_Name]["username"]
+                    encrypted_user_secret_key = content[Sftp_Name]["user_secret_key"]
+                    connection_code = content[Sftp_Name]["connection_code"]
+                    encrypted_port = content[Sftp_Name].get("port", "")
+                    fout.close()
+                except KeyError as e:
+                    logging.warning(f"Error in loading sftp creds: {e}")
+                    return None, None
+                except Exception as e:
+                    logging.warning(f"Error in loading sftp creds: {e}")
+                    return None, None
+            logging.warning(f"SFTP Creds loaded for: {Sftp_Name}")
+        else:
+            logging.warning("Sftp json file path changed or does not exist.")
+            return None, None
+        
+        hostname, username, user_secret_key, port = decrypt_existing_sftp_credentials(encrypted_hostname, encrypted_username, encrypted_user_secret_key, encrypted_port, connection_code)
+        
+        global sftp_client
+        ssh_client = paramiko.SSHClient()
+        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        logging.warning(f"Connecting to the SFTP server: {Sftp_Name}...")
+        ssh_client.connect(hostname=hostname, username=username, password=user_secret_key, port=port, banner_timeout=200, look_for_keys=False)
+        sftp_client = ssh_client.open_sftp()
+        logging.warning("Connected to the SFTP server.")
+        return sftp_client, ssh_client
+    
+    except ssh_exception.AuthenticationException as e:
+        logging.warning(f"AuthenticationException Connnecting to the sftp: {Sftp_Name}: {e}")
+        return None, None
+
+    except Exception as e:
+        logging.warning(f"Error Connnecting to the sftp: {Sftp_Name}: {e}")
+        return None, None
+
+
+def read_all_master(config_file, source_data_validation):
+    """
+    Read Masters for Master check
+    """
+
+    config_file_masters_list = source_data_validation.loc[source_data_validation['master_source'].str.lower().str.replace(" ","_") == 'config_file', 'master_table']
+    config_file_masters_list = config_file_masters_list.unique()
+    source_data_table_masters_list = source_data_validation.loc[source_data_validation['master_source'].str.lower().str.replace(" ","_") == 'source_data_table', 'master_table']
+    source_data_table_masters_list = source_data_table_masters_list.unique()
+    
+    all_config_master = {}
+    for master in config_file_masters_list:
+        if not pd.isna(master):
+            try:
+                all_config_master[master] = config_file.parse(master)
+                logging.warning(f"Read Master for master check: {master}")
+            except ValueError as e:
+                logging.warning(f"Master Not Found for master check: {master}")
+
+    all_source_table_master = {}
+    for master in source_data_table_masters_list:
+        if not pd.isna(master):
+            # Reading source table for master check
+            logging.warning(f"Reading master table: {master}")
+            file_path = os.path.join(parquet_raw_path,f"{master}.parquet")
+                       
+            if os.path.exists(file_path):
+                all_source_table_master[master] = pd.read_parquet(file_path)
+                logging.warning(f"Read Master for master check: {master}")
+            else:
+                logging.warning(f"Source data file for '{master}' not found. Skipping this master.")
+                raise Exception(f"Source data file for '{master}' not found. Skipping this master.")
+        
+
+    return all_config_master, all_source_table_master
+
+
+
 
 # Main Code
 global config_file_path, raw_data_dir
 config_file_path = Config_File_Path
 
-sftp_creds = Data1
-
-# if Sftp_Name is None or Sftp_Name == "":
-#     logging.warning("Terminating because sftp name not found")
-#     raise Exception("Terminating because sftp name not found")
-  
-try:
-    # filtered_sftp_df =sftp_creds[sftp_creds['variable_name'] == 'Sftp Name'].reset_index(drop=True)
-    # index = filtered_sftp_df[filtered_sftp_df['variable_value'] == Sftp_Name].index[0]
-    
-    hostname = sftp_creds.loc[sftp_creds["variable_name"] == "Hostname", "variable_value"].iloc[0]
-    username = sftp_creds.loc[sftp_creds["variable_name"] == "Username", "variable_value"].iloc[0]
-    user_secret_key = sftp_creds.loc[sftp_creds["variable_name"] == "Password", "variable_value"].iloc[0]
-    port = sftp_creds.loc[sftp_creds["variable_name"] == "Port", "variable_value"].iloc[0]
-    
-    global sftp_client
-    ssh_client = paramiko.SSHClient()
-    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    logging.warning(f"Connecting to the SFTP server: {username}...")
-    ssh_client.connect(hostname=hostname, username=username, password=user_secret_key, port=port, banner_timeout=200)
-    sftp_client = ssh_client.open_sftp()
-    logging.warning("Connected to the SFTP server.")
-
-except ssh_exception.AuthenticationException as e:
-    logging.warning(f"AuthenticationException Connnecting to the sftp: {username}: {e}")
-
-except Exception as e:
-    logging.warning(f"Error Connnecting to the sftp: {username}: {e}")
-    raise Exception(f"Error Connnecting to the sftp: {username}: {e}")
-
-# Read Antares Master File
-try:
-    with sftp_client.file(config_file_path, 'rb') as remote_file:
-        file_data = remote_file.read()
-    master_file_buffer = BytesIO(file_data)
-except FileNotFoundError:
-    raise Exception(f"File not found:{config_file_path}")
-
-global dq_run_date
-dq_run_date = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M')
 
 global parquet_path, parquet_raw_path, parquet_error_free_path
 parquet_path = r"/opt/revolutio/Platform_Configs/alm_data/Data Framework"
@@ -443,13 +890,20 @@ except FileNotFoundError:
 except OSError as e:
     logging.warning(f"Error deleting Raw Data directory: {e}")
 
-os.makedirs(parquet_error_free_path, exist_ok=True)
+sftp_client, ssh_client = get_sftp_connection(Sftp_Name)
 
-global config_file, master_repository
+if sftp_client is None:
+    raise Exception(f"Couldn't connect to SFTP: {Sftp_Name}")
 
-# Validation, Master Repository 
-source_data_validation = Data2
-master_repository = Data3
+# Read Antares Master File
+try:
+    with sftp_client.file(config_file_path, 'rb') as remote_file:
+        file_data = remote_file.read()
+    master_file_buffer = BytesIO(file_data)
+except Exception:
+    logging.warning(f"File not found:{config_file_path}")
+
+global config_file, mapping_set, global_params
 
 # Read necessary sheets
 try:
@@ -458,14 +912,35 @@ try:
 except Exception as e:
     raise Exception(f"Error reading config file/global parameter sheet:{e}")
 
+# Validation, Master Repository 
+source_data_validation = Data6
+mapping_set = Data5
+
 logging.warning(f"All config sheets are loaded")
 
-# Read extract_date to log in DQ report
+# Read all master tables for master check
+global all_config_masters, all_source_table_masters, all_system_masters
+all_config_masters, all_source_table_masters = read_all_master(config_file, source_data_validation)
+all_system_masters = {}
+all_system_masters['master_repository'] = Data4
+# all_system_masters['client_product_master'] = Data1
+# all_system_masters['counterparty_master'] = Data2
+# all_system_masters['gl_master'] = Data3
+
+logging.warning("Read all Master table for master checks:")
+logging.warning(f"Master source config_file: {all_config_masters.keys()}")
+logging.warning(f"Master source source_data_table: {all_source_table_masters.keys()}")
+logging.warning(f"Master source system_masters:{all_system_masters.keys()}")
+
+# Read extract_date and dq_run_date to log in DQ report
 global extract_date
 try:
     extract_date = global_params.loc[global_params['column_name'].str.lower().str.strip() == "reporting_date", 'value'].iloc[0].strftime("%Y-%m-%d")
 except IndexError as e:
     extract_date = ""
+
+global dq_run_date
+dq_run_date = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M')
 
 global validation_error
 validation_error = {
@@ -494,6 +969,8 @@ output_data = pd.DataFrame({
 output_data["id"] = output_data.index + 1
 output_data.insert(0, 'id', output_data.pop('id'))
 
+# validation_error_df.to_csv(r"C:\Users\BAnilKumar\Downloads\dq\DQ-18-JAN.csv")
+output_data = validation_error_df.astype(str)
 ssh_client.close()
 sftp_client.close()
 logging.warning("   ")
