@@ -18,6 +18,17 @@ from Core.users.computations.sftp_credential_encryption import decrypt_existing_
 
 global get_db_connection
 def get_db_connection(database, location):
+    """
+    Parameters:
+    - database (str): The name of the database to connect to.
+    - location (str): The location of the database (INTERNAL or EXTERNAL).
+
+    Returns:
+    - engine: SQLAlchemy engine object.
+    - connection: SQLAlchemy connection object.
+    - schema: The schema of the database.
+    - inspector: SQLAlchemy inspector object.
+    """
 
     logging.warning(f"Establishing {location} DB connection for: {database}")
     if location == "INTERNAL":
@@ -125,7 +136,7 @@ def get_sftp_connection(Sftp_Name):
         ssh_client = paramiko.SSHClient()
         ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         logging.warning(f"Connecting to the SFTP server: {Sftp_Name}...")
-        ssh_client.connect(hostname=hostname, username=username, password=user_secret_key, port=port, banner_timeout=200)
+        ssh_client.connect(hostname=hostname, username=username, password=user_secret_key, port=port, banner_timeout=200, look_for_keys=False)
         sftp_client = ssh_client.open_sftp()
         logging.warning("Connected to the SFTP server.")
         return sftp_client, ssh_client
@@ -141,7 +152,10 @@ def get_sftp_connection(Sftp_Name):
 
 global check_db
 def check_db(all_db_sources, location):
-    
+    """
+    Check if db sources exist or not
+    """
+
     for connection_name, db_group in all_db_sources:
         
         engine, connection, schema, inspector = get_db_connection(connection_name, location)
@@ -153,6 +167,7 @@ def check_db(all_db_sources, location):
         
         tables = db_group["source_name"].unique()
 
+        # iterate over each table for a connection
         for table in tables:
 
             logging.warning(f"Avaliability Check for: {table}")
@@ -179,6 +194,9 @@ def check_db(all_db_sources, location):
 
 global check_sftp
 def check_sftp(all_sftp_sources):
+    """
+    Check if sftp sources exist or not
+    """
 
     for connection_name, sftp_group in all_sftp_sources:
         
@@ -190,7 +208,8 @@ def check_sftp(all_sftp_sources):
             return 
 
         files = sftp_group["source_name"].unique()
-        # Iterate over each file
+
+        # Iterate over each file for a connection
         for file in files:
 
             logging.warning(f"Avaliability Check for: {file}")
@@ -218,7 +237,10 @@ def check_sftp(all_sftp_sources):
 
 global check
 def check(source_definitions):
-    
+    """
+    Filter and separate the souces based on connection type: DATABASE or SFTP
+    """
+
     try:
         # Filter By source_connection_type, and group by source_location
         internal_db_check_to_perform = source_definitions[

@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Wed Jan 15 23:09:20 2025
-
-@author: BAnilKumar
-"""
-
 """
 source_filter.py
 This script filters the source data according to specified criteria and saves the filtered data as a Parquet file.
@@ -12,24 +5,18 @@ It ensures that only relevant data is retained for further processing.
 """
 
 import logging
-import time
-
-start_time = time.time()
 logging.warning("Started Source Filtering.....\n")
 
-global ssh_exception, BytesIO
+global ssh_exception, BytesIO, shutil
 global pa, pq
-global datetime
-global create_engine, inspect, decrypt_existing_db_credentials, default_engine_creator
+global create_engine, URL, inspect, decrypt_existing_db_credentials, default_engine_creator
 global PLATFORM_FILE_PATH, decrypt_existing_sftp_credentials
 from paramiko import ssh_exception
 import json
-# can be removed in computation editor
 import paramiko
 import pandas as pd
 import os
 import json
-
 import shutil
 from paramiko import ssh_exception
 from io import BytesIO
@@ -370,11 +357,12 @@ def extract_and_apply_filters(table_name, df, filters):
                 all_filtered_df[target_table_name] = df
                 logging.warning(f"Global Variable not defined: {filterr['condition_value']}")
                 continue
-          
-            condition_value_row = global_params.loc[global_params['column_name'].str.lower().str.strip() == condition_global_var, 'value']
+            if condition_global_var == 'reporting_date':
+                condition_value = reporting_date
+            # condition_value_row = global_params.loc[global_params['column_name'].str.lower().str.strip() == condition_global_var, 'value']
             
-            if condition_value_row is not None:
-                condition_value = condition_value_row.iloc[0]
+            # if condition_value_row is not None:
+            #     condition_value = condition_value_row.iloc[0]
             else:
                 logging.warning(f"condition_value: {condition_global_var} not present in global parameters")
                 all_filtered_df[target_table_name] = df
@@ -433,7 +421,6 @@ def process_db_filters(all_db_filters, location):
 
             extract_and_apply_filters(table_name, df, filters)
 
-
         connection.close()
         engine.dispose()
         logging.warning(f"Done for {connection_name}")
@@ -444,12 +431,6 @@ global process_sftp_filters
 def process_sftp_filters(all_sftp_filters):
     """
     Process all SFTP filters.
-
-    Parameters:
-    - all_sftp_filters (DataFrame): The dataframe containing all the SFTP filters.
-
-    Returns:
-    - None: The filtered data is stored in the global variable all_filtered_df.
     """
 
     # Iterate over each connection_name
@@ -523,12 +504,6 @@ global filter_source
 def filter_source(all_filters):
     """
     Apply filters to the source data.
-
-    Parameters:
-    - all_filters (DataFrame): The dataframe containing all the filters.
-
-    Returns:
-    - None: The filtered data is stored in the global variable all_filtered_df.
     """
     
     global all_filtered_df
@@ -576,79 +551,67 @@ def filter_source(all_filters):
         logging.warning("   ")
         logging.warning("   ")
 
-    logging.warning(f"Saving file to parquet dir: {parquet_raw_path}")
     # Save filtered data to parquet
+    logging.warning(f"Saving file to parquet dir: {parquet_raw_path}")
     
     if all_filtered_df:
+        
+        # Create directories if not exist, remove raw data directory if exist
+        try:
+            os.makedirs(parquet_path, exist_ok=True)
+            shutil.rmtree(parquet_raw_path)
+            os.makedirs(parquet_raw_path)   
+        except FileNotFoundError:
+            os.makedirs(parquet_raw_path)    
+        except OSError as e:
+            logging.warning(f"Error deleting Raw Data directory: {e}")
+
         for table_name, temp_df in all_filtered_df.items():
-            # save to Raw Data Directory
-            df_save_path_parquet = os.path.join(parquet_raw_path, f"{table_name}.parquet")
-            temp_table = pa.Table.from_pandas(temp_df)
-            pq.write_table(temp_table, df_save_path_parquet)
-          
-            # save to local for testing
-            output_file = fr"/home/azureuser/DataFrameWork Testing/Latest/Filtered Raw Data/{table_name}.csv"
-            excel_buffer = BytesIO()
-            temp_df.to_csv(excel_buffer, index=False)
-            excel_buffer.seek(0)
-            main_sftp_client.putfo(excel_buffer, output_file)
-                
-            # path = r"C:\Users\BAnilKumar\Downloads\dq\Filtered Raw Data"
-            # path = os.path.join(path,f"{table_name}.xlsx")
-            # temp_df.to_excel(path, index = False)
-            logging.warning(f"Saved: {table_name}")
+            try:
+                # save to Raw Data Directory
+                df_save_path_parquet = os.path.join(parquet_raw_path, f"{table_name}.parquet")
+                temp_table = pa.Table.from_pandas(temp_df)
+                pq.write_table(temp_table, df_save_path_parquet)
+              
+                # save to local for testing
+                output_file = fr"/home/azureuser/DataFrameWork Testing/Latest/Filtered Raw Data/{table_name}.csv"
+                excel_buffer = BytesIO()
+                temp_df.to_csv(excel_buffer, index=False)
+                excel_buffer.seek(0)
+                main_sftp_client.putfo(excel_buffer, output_file)
+                    
+                # path = r"C:\Users\BAnilKumar\Downloads\dq\Filtered Raw Data"
+                # path = os.path.join(path,f"{table_name}.xlsx")
+                # temp_df.to_excel(path, index = False)
+                logging.warning(f"Saved: {table_name}")
+            except Exception as e:
+                logging.warning(f"Error while saving file:{table_name} {e}")
+
+        try:
+            main_ssh_client.close()
+            main_sftp_client.close()
+        except Exception as e:
+            logging.warning(f"{e}")
     else:
         logging.warning("No data to be saved.")
 
 
 # Main Code
-global config_file_path
-config_file_path = Config_File_Path
 
+try:
+    global main_sftp_client, main_ssh_client
+    main_sftp_client, main_ssh_client = get_sftp_connection('Antares SFTP')
+except Exception as e:
+    logging.warning(f"{e}")
+
+global reporting_date
+reporting_date = Reporting_Date
 global parquet_path, parquet_raw_path
-parquet_path = r"/opt/revolutio/Platform_Configs/alm_data/Data Framework"
+parquet_path = os.path.join(PLATFORM_FILE_PATH, "alm_data/Data Framework")
 parquet_raw_path = os.path.join(parquet_path, "Raw Data")
-
-# Create main directories if not exist, remove raw data directory if exist
-try:
-    os.makedirs(parquet_path, exist_ok=True)
-    shutil.rmtree(parquet_raw_path)
-    os.makedirs(parquet_raw_path)   
-except FileNotFoundError:
-    os.makedirs(parquet_raw_path)    
-except OSError as e:
-    logging.warning(f"Error deleting Raw Data directory: {e}")
-
-global main_sftp_client, main_ssh_client
-main_sftp_client, main_ssh_client = get_sftp_connection(Sftp_Name)
-
-if main_sftp_client is None:
-    raise Exception(f"Couldn't connect to SFTP: {Sftp_Name}")
-
-# Read Antares Master File
-try:
-    with main_sftp_client.file(config_file_path, 'rb') as remote_file:
-        file_data = remote_file.read()
-    master_file_buffer = BytesIO(file_data)
-except FileNotFoundError:
-    raise Exception(f"File not found:{config_file_path}")
-except Exception as e:
-    raise Exception(f"Error in reading config file: {e}")
-  
-# Source Data definition
-
-global config_file, master_repository, global_params
-try:
-    config_file = pd.ExcelFile(master_file_buffer)
-    global_params = config_file.parse('global_parameter')
-except Exception as e:
-    raise Exception(f"Error reading configs file/global parameter sheet: {e}")
-
 
 source_data_definition = Data1
 mapping_set = Data2
-
-global_params.columns = global_params.columns.str.replace(" ","_").str.lower()
 
 logging.warning(f"All config sheets are loaded")
 
@@ -661,13 +624,12 @@ logging.warning("Ended processing source_data_definition")
 file_names = source_data_definition['source_table_name'].unique()
 file_status = [file_name in all_filtered_df.keys() for file_name in file_names]
 
-output_data = pd.DataFrame({
+filter_status_df = pd.DataFrame({
     "Table Name": file_names,
     "Filter Status": file_status
 })
-output_data["id"] = output_data.index + 1
-output_data.insert(0, 'id', output_data.pop('id'))
+filter_status_df["id"] = filter_status_df.index + 1
+filter_status_df.insert(0, 'id', filter_status_df.pop('id'))
+output_data = filter_status_df.astype(str)
 
-main_ssh_client.close()
-main_sftp_client.close()
 logging.warning("Source Filter Completed.")

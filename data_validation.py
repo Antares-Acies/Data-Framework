@@ -5,8 +5,8 @@ It generates a Data Quality (DQ) Report that highlights any discrepancies or iss
 """
 
 global create_engine, inspect
-global paramiko, ssh_exception, BytesIO, json
-global datetime, pytz
+global paramiko, ssh_exception, BytesIO, json, shutil
+global pytz
 global pa, pq
 
 import logging
@@ -140,6 +140,10 @@ def filter_data(df, filter_details):
     if pd.isna(filter_value_type):
         error_msg = f"Filter Value Type is empty, skipping this validation"
         return None, error_msg
+      
+    if pd.isna(filter_condition_value):
+        error_msg = f"Filter Condition Value is empty, skipping this validation"
+        return None, error_msg
 
     logging.warning("Filter Details: ")    
     logging.warning(f"Filter column: {filter_column} Datatype: {filter_condition_datatype}")    
@@ -153,12 +157,13 @@ def filter_data(df, filter_details):
 
     
     if filter_value_type == 'global_variable':
-        global_var = global_params.loc[global_params['column_name'] == filter_condition_value, 'value']
-        if not global_var.empty:
-            filter_condition_value = global_var.iloc[0]
+        if filter_condition_value.lower().replace(' ','_') == 'reporting_date':
+            g_condition_value = filter_condition_value
+            filter_condition_value = reporting_date
+            logging.warning(f"condition_value fetched for global_variable: {g_condition_value}: {filter_condition_value}")
         else:
-            error_msg = f"Global variable defined for filter not avaiable in Global Parameter Sheet, skipping this validation"
-            filtered_df = None
+            error_msg = f"Global variable defined:{filter_condition_value} not avaiable in Global Parameters, skipping this validation"
+            return None, error_msg
 
     if filter_value_type == 'mapping_set':
         logging.warning(f"Filtering with Mapping Set: {filter_condition_value}")
@@ -257,13 +262,13 @@ def validate_data(file, df, filter_details, check_details, master_check_details,
     
     filter_column, filter_condition_datatype, filter_condition_type, filter_condition_value, filter_value_type = filter_details
     if not (pd.isna(filter_column) and pd.isna(filter_condition_datatype) and pd.isna(filter_condition_type) and pd.isna(filter_condition_value) and pd.isna(filter_value_type)):
-        logging.warning("Filtering the df")
+        logging.warning(f"Filtering the df: {len(df)}")
         filtered_df, error_msg = filter_data(df, filter_details)
         if error_msg is not None:
             logging.warning(error_msg)
             log_error(file, check_type, error_reporting_tag, dq_column_name=column_name, error_message = error_msg, error_type=error_type)
             return
-        logging.warning("Filtered the df")
+        logging.warning(f"Filtered the df: {len(filtered_df)}")
     else:
         filtered_df = df
     
@@ -425,10 +430,9 @@ def validate_data(file, df, filter_details, check_details, master_check_details,
 
         check_value_type = check_value_type.strip().lower().replace(" ","_")
         if check_value_type == 'global_variable':
-            global_var = global_params.loc[global_params['column_name'] == condition_value, 'value']
-            g_condition_value = condition_value
-            if not global_var.empty:
-                condition_value = global_var.iloc[0]
+            if condition_value.lower().replace(' ','_') == 'reporting_date':
+                g_condition_value = condition_value   
+                condition_value = reporting_date
             else:
                 logging.warning("Global variable defined not avaiable in Global Parameter Sheet, skipping this validation")
                 log_error(file, check_type, error_reporting_tag, unique_identifier=None, dq_column_name=column_name, error_message = "Global variable defined not avaiable in Global Parameter Sheet, skipping this validation", error_type=error_type)
@@ -597,7 +601,7 @@ def process_validations(all_validations):
         
         file_path = os.path.join(parquet_raw_path,f"{file}.parquet")
 
-        # if file != 'pennant_pos_data':
+        # if file != 'indus_pos_data':
         #     continue
 
         # File read
@@ -621,7 +625,7 @@ def process_validations(all_validations):
             logging.warning("   ")
             logging.warning(f"Validating row:{i+2}")
     
-            # if i+2 != 148:
+            # if i+2 != 10: # add the row value for which you have to test
             #     continue
         
             # pre filter values
@@ -749,6 +753,16 @@ def validate(all_checks):
         logging.warning("Completed Sftp Validation")
     
     if all_validated_df:
+        
+        # Create directories if not exist
+        try:
+            shutil.rmtree(parquet_error_free_path)
+            os.makedirs(parquet_error_free_path)   
+        except FileNotFoundError:
+            os.makedirs(parquet_error_free_path)    
+        except OSError as e:
+            logging.warning(f"Error deleting Raw Data directory: {e}")
+
         for table_name, temp_df in all_validated_df.items():
             try:
                 # save to Raw Data Directory
@@ -770,6 +784,12 @@ def validate(all_checks):
                 logging.warning(f"Parquet saved for {table_name}, ")
             except Exception as e:
                 logging.warning(f"Error in saving parquet for {table_name}, {e}")
+
+        try:
+            ssh_client.close()
+            sftp_client.close()
+        except Exception as e:
+            logging.warning(f"{e}")
     else:
         logging.warning("No data to be saved.")
 
@@ -829,25 +849,14 @@ def get_sftp_connection(Sftp_Name):
         return None, None
 
 
-def read_all_master(config_file, source_data_validation):
+def read_all_master(source_data_validation):
     """
     Read Masters for Master check
     """
 
-    config_file_masters_list = source_data_validation.loc[source_data_validation['master_source'].str.lower().str.replace(" ","_") == 'config_file', 'master_table']
-    config_file_masters_list = config_file_masters_list.unique()
     source_data_table_masters_list = source_data_validation.loc[source_data_validation['master_source'].str.lower().str.replace(" ","_") == 'source_data_table', 'master_table']
     source_data_table_masters_list = source_data_table_masters_list.unique()
     
-    all_config_master = {}
-    for master in config_file_masters_list:
-        if not pd.isna(master):
-            try:
-                all_config_master[master] = config_file.parse(master)
-                logging.warning(f"Read Master for master check: {master}")
-            except ValueError as e:
-                logging.warning(f"Master Not Found for master check: {master}")
-
     all_source_table_master = {}
     for master in source_data_table_masters_list:
         if not pd.isna(master):
@@ -863,64 +872,35 @@ def read_all_master(config_file, source_data_validation):
                 raise Exception(f"Source data file for '{master}' not found. Skipping this master.")
         
 
-    return all_config_master, all_source_table_master
-
+    return all_source_table_master
 
 
 
 # Main Code
-global config_file_path, raw_data_dir
-config_file_path = Config_File_Path
-
 
 global parquet_path, parquet_raw_path, parquet_error_free_path
-parquet_path = r"/opt/revolutio/Platform_Configs/alm_data/Data Framework"
+parquet_path = os.path.join(PLATFORM_FILE_PATH, "alm_data/Data Framework")
 parquet_raw_path = os.path.join(parquet_path, "Raw Data")
 parquet_error_free_path = os.path.join(parquet_path, "Error Free Data")
 
-# Create directories if not exist
 if not os.path.exists(parquet_raw_path):
     raise Exception("No Raw Data found")
 
 try:
-    shutil.rmtree(parquet_error_free_path)
-    os.makedirs(parquet_error_free_path)   
-except FileNotFoundError:
-    os.makedirs(parquet_error_free_path)    
-except OSError as e:
-    logging.warning(f"Error deleting Raw Data directory: {e}")
-
-sftp_client, ssh_client = get_sftp_connection(Sftp_Name)
-
-if sftp_client is None:
-    raise Exception(f"Couldn't connect to SFTP: {Sftp_Name}")
-
-# Read Antares Master File
-try:
-    with sftp_client.file(config_file_path, 'rb') as remote_file:
-        file_data = remote_file.read()
-    master_file_buffer = BytesIO(file_data)
-except Exception:
-    logging.warning(f"File not found:{config_file_path}")
-
-global config_file, mapping_set, global_params
-
-# Read necessary sheets
-try:
-    config_file = pd.ExcelFile(master_file_buffer)
-    global_params = config_file.parse('global_parameter')
+    sftp_client, ssh_client = get_sftp_connection('Antares SFTP')
 except Exception as e:
-    raise Exception(f"Error reading config file/global parameter sheet:{e}")
+    logging.warning(f"{e}")
 
 # Validation, Master Repository 
+global source_data_validation, mapping_set
 source_data_validation = Data6
 mapping_set = Data5
 
 logging.warning(f"All config sheets are loaded")
 
 # Read all master tables for master check
-global all_config_masters, all_source_table_masters, all_system_masters
-all_config_masters, all_source_table_masters = read_all_master(config_file, source_data_validation)
+global all_source_table_masters, all_system_masters
+all_source_table_masters = read_all_master(source_data_validation)
 all_system_masters = {}
 all_system_masters['master_repository'] = Data4
 # all_system_masters['client_product_master'] = Data1
@@ -928,16 +908,13 @@ all_system_masters['master_repository'] = Data4
 # all_system_masters['gl_master'] = Data3
 
 logging.warning("Read all Master table for master checks:")
-logging.warning(f"Master source config_file: {all_config_masters.keys()}")
 logging.warning(f"Master source source_data_table: {all_source_table_masters.keys()}")
 logging.warning(f"Master source system_masters:{all_system_masters.keys()}")
 
 # Read extract_date and dq_run_date to log in DQ report
-global extract_date
-try:
-    extract_date = global_params.loc[global_params['column_name'].str.lower().str.strip() == "reporting_date", 'value'].iloc[0].strftime("%Y-%m-%d")
-except IndexError as e:
-    extract_date = ""
+global extract_date, reporting_date
+extract_date = Reporting_Date
+reporting_date = Reporting_Date
 
 global dq_run_date
 dq_run_date = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M')
@@ -971,7 +948,6 @@ output_data.insert(0, 'id', output_data.pop('id'))
 
 # validation_error_df.to_csv(r"C:\Users\BAnilKumar\Downloads\dq\DQ-18-JAN.csv")
 output_data = validation_error_df.astype(str)
-ssh_client.close()
-sftp_client.close()
+
 logging.warning("   ")
 logging.warning("Validation Completed")
